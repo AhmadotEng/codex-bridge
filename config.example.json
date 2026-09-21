@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "peer_id": "computer-a",
+  "listen_port": 47321,
+  "state_dir": "C:\\Users\\YourName\\.codex-bridge\\state",
+  "codex_path": "C:\\Tools\\Codex\\codex.exe",
+  "local_token": "",
+  "peers": {
+    "computer-b": {
+      "incoming_token": "",
+      "outgoing_token": "",
+      "enabled": false,
+      "url": "http://127.0.0.1:47322"
+    }
+  },
+  "projects": {
+    "sample-project": {
+      "name": "Sample collaboration",
+      "workspace": "C:\\Users\\YourName\\CodexBridgeProjects\\Sample",
+      "export_root": "C:\\Users\\YourName\\CodexBridgeProjects\\Sample\\bridge-export",
+      "import_root": "C:\\Users\\YourName\\CodexBridgeProjects\\Sample\\bridge-import",
+      "allowed_peers": [
+        "computer-b"
+      ],
+      "allowed_ops": [
+        "tasks",
+        "messages",
+        "artifacts",
+        "context"
+      ],
+      "policy": "read-only"
+    }
+  },
+  "ssh_transport": {
+    "enabled": false,
+    "ssh_exe": "C:\\Tools\\OpenSSH\\ssh.exe",
+    "ssh_host": "computer-b.example",
+    "ssh_port": 22,
+    "username": "collaborator",
+    "identity_file": "C:\\Keys\\CodexBridge\\id_ed25519",
+    "known_hosts_file": "C:\\Keys\\CodexBridge\\known_hosts",
+    "host_key_alias": "paired-computer",
+    "local_peer_port": 47322,
+    "remote_bridge_port": 47321,
+    "remote_peer_port": 47322
+  }
+}

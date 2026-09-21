@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "codex_bridge": {
+      "command": "python",
+      "args": ["-u", "-c", "import runpy; from pathlib import Path; runpy.run_path(str(Path.home() / 'plugins' / 'codex-bridge' / 'codex_bridge' / 'mcp.py'), run_name='__main__')"]
+    }
+  }
+}

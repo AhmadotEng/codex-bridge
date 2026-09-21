@@ -1,0 +1,26 @@
+{
+  "name": "codex-bridge",
+  "version": "0.1.0",
+  "description": "Exchange scoped project tasks, messages, and selected files with a paired Codex computer over an existing SSH transport.",
+  "author": {
+    "name": "AhmadotEng"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Bridge",
+    "shortDescription": "Collaborate with a paired Codex computer.",
+    "longDescription": "Create scoped collaboration sessions, exchange tasks and results, and transfer selected artifacts. Each computer keeps its Codex authentication and execution local.",
+    "developerName": "AhmadotEng",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Check my paired computer and collaboration sessions.",
+      "Send a task to my collaborator in the selected project.",
+      "Inspect replies and results from my collaboration session."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

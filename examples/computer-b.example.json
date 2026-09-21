@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "peer_id": "computer-b",
+  "listen_port": 47321,
+  "state_dir": "C:\\Users\\YourName\\.codex-bridge\\state",
+  "codex_path": "C:\\Tools\\Codex\\codex.exe",
+  "local_token": "",
+  "peers": {
+    "computer-a": {
+      "incoming_token": "",
+      "outgoing_token": "",
+      "enabled": false,
+      "url": "http://127.0.0.1:47322"
+    }
+  },
+  "projects": {
+    "sample-project": {
+      "name": "Sample collaboration",
+      "workspace": "C:\\Users\\YourName\\CodexBridgeProjects\\Sample",
+      "export_root": "C:\\Users\\YourName\\CodexBridgeProjects\\Sample\\bridge-export",
+      "import_root": "C:\\Users\\YourName\\CodexBridgeProjects\\Sample\\bridge-import",
+      "allowed_peers": [
+        "computer-a"
+      ],
+      "allowed_ops": [
+        "tasks",
+        "messages",
+        "artifacts",
+        "context"
+      ],
+      "policy": "read-only"
+    }
+  }
+}
