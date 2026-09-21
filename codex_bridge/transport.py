@@ -163,8 +163,9 @@ def transport_directory(cfg, peer_id):
 
 
 def _read_record(path):
+    from .cli import read
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        return read(path)
     except (OSError, ValueError):
         return {}
 

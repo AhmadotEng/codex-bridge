@@ -177,16 +177,28 @@ class ChunkedArtifactTests(unittest.IsolatedAsyncioTestCase):
         self.export('alpha')
         import codex_bridge.artifacts as artifacts
         original = artifacts.sha_file
+        entered = threading.Event()
+        release = threading.Event()
+        escaped = threading.Event()
+        completed = threading.Event()
         def slow_hash(path):
-            time.sleep(.3)
-            return original(path)
+            entered.set()
+            if not release.wait(10):
+                escaped.set()
+            result = original(path)
+            completed.set()
+            return result
         with patch('codex_bridge.artifacts.sha_file', slow_hash):
-            await self.rpc('alpha', 'artifact_send', self.send_args())
-            await asyncio.sleep(.05)
-            started = time.monotonic()
-            response = await self.rpc('alpha', 'peer_status', {})
-            self.assertTrue(response['peers'][0]['available'])
-            self.assertLess(time.monotonic() - started, .25)
+            try:
+                await self.rpc('alpha', 'artifact_send', self.send_args())
+                self.assertTrue(await asyncio.to_thread(entered.wait, 10), 'Hashing did not start')
+                response = await self.rpc('alpha', 'peer_status', {})
+                self.assertTrue(response['peers'][0]['available'])
+                self.assertFalse(escaped.is_set(), 'Hashing blocked progress until its failsafe expired')
+                self.assertFalse(completed.is_set(), 'Status must complete while hashing is still held')
+                self.assertFalse(release.is_set())
+            finally:
+                release.set()
             self.assertEqual((await self.finished('alpha', 'large-send'))['status'], 'completed')
 
     async def offer(self, **changes):

@@ -100,22 +100,32 @@ class TransportTests(unittest.TestCase):
 
     def test_supervisors_stop_and_revoke_independently(self):
         failures = []
+        revoked = threading.Event()
+        conflict_injected = threading.Event()
+        original_read = Path.read_text
+        def sharing_conflict(path, *args, **kwargs):
+            if path == self.path and threading.current_thread().name == "transport-peer-a" and revoked.is_set() and not conflict_injected.is_set():
+                conflict_injected.set()
+                raise PermissionError("Simulated Windows atomic replacement sharing conflict")
+            return original_read(path, *args, **kwargs)
         def run(peer):
             try: supervise_transport(self.path, peer)
-            except Exception as exc: failures.append(exc)
-        with patch("codex_bridge.transport._spawn_ssh", side_effect=FakeSSH):
-            threads = {peer: threading.Thread(target=run, args=(peer,)) for peer in self.cfg["peers"]}
+            except Exception as exc: failures.append((peer, type(exc).__name__, str(exc)))
+        with patch("codex_bridge.transport._spawn_ssh", side_effect=FakeSSH), patch("codex_bridge.core._WINDOWS_IO", True), patch.object(Path, "read_text", sharing_conflict):
+            threads = {peer: threading.Thread(target=run, args=(peer,), name="transport-"+peer) for peer in self.cfg["peers"]}
             for thread in threads.values(): thread.start()
             try:
                 deadline = time.monotonic()+8
                 while time.monotonic()<deadline and not all((transport_directory(self.cfg, peer)/"ssh.pid.json").exists() for peer in threads):
                     time.sleep(.05)
                 self.assertFalse(failures)
-                self.assertTrue(all(thread.is_alive() for thread in threads.values()))
+                self.assertTrue(all(thread.is_alive() for thread in threads.values()), failures)
                 self.cfg["peers"]["peer-b"]["enabled"] = False; self.write(self.cfg)
+                revoked.set()
                 threads["peer-b"].join(5)
                 self.assertFalse(threads["peer-b"].is_alive())
-                self.assertTrue(threads["peer-a"].is_alive())
+                self.assertTrue(conflict_injected.wait(2), "Expected the healthy supervisor to reopen the updated config")
+                self.assertTrue(threads["peer-a"].is_alive(), failures)
                 result = stop_transports(self.path, "peer-a", timeout=5)
                 threads["peer-a"].join(2)
                 self.assertTrue(result["transports"][0]["stopped"])

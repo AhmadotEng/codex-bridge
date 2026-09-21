@@ -20,6 +20,23 @@ MAX_FILE = 8 * 1024 * 1024
 MAX_HTTP = 12 * 1024 * 1024
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted', 'uncertain'}
 OPS = {'tasks', 'messages', 'artifacts', 'context'}
+_WINDOWS_IO = os.name == 'nt'
+
+
+def windows_file_retry(operation, *, timeout=1.0):
+    """Retry brief Windows sharing conflicts; persistent denial fails closed.
+
+    An atomic replacement can briefly deny both readers and replacers on
+    Windows. Reopen the current file each time; never return a cached scope.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return operation()
+        except PermissionError:
+            if not _WINDOWS_IO or time.monotonic() >= deadline:
+                raise
+            time.sleep(min(.01, max(0, deadline-time.monotonic())))
 
 
 def now():
@@ -127,7 +144,7 @@ class Bridge:
                 self.store.put('incoming', task['request_id'], task)
 
     def config(self):
-        cfg = json.loads(self.config_path.read_text(encoding='utf-8-sig'))
+        cfg = json.loads(windows_file_retry(lambda: self.config_path.read_text(encoding='utf-8-sig')))
         if cfg.get('version') != 1:
             raise BridgeError('configuration', 'Unsupported configuration version')
         return cfg
@@ -847,9 +864,8 @@ class Bridge:
         if peer_id not in cfg.get('peers',{}):
             raise BridgeError('peer_not_found','Unknown peer')
         cfg['peers'][peer_id]['enabled']=False
-        temporary=self.config_path.with_suffix('.json.tmp')
-        temporary.write_text(json.dumps(cfg,indent=2),encoding='utf-8')
-        os.replace(temporary,self.config_path)
+        from .cli import save
+        save(self.config_path,cfg)
         await self.artifact_transfers.revoke(peer_id)
         cancelled=[]
         for task in self.store.all('incoming'):

@@ -16,7 +16,7 @@ import time
 import urllib.request
 import uuid
 
-from .core import Bridge, BridgeError, canonical, identifier, now
+from .core import Bridge, BridgeError, canonical, identifier, now, windows_file_retry
 
 
 def config_path():
@@ -40,7 +40,7 @@ def save(path,data):
     temporary=path.with_name(path.name+'.'+uuid.uuid4().hex+'.tmp')
     try:
         private_invitation(temporary,data)
-        os.replace(temporary,path)
+        windows_file_retry(lambda: os.replace(temporary,path))
     finally:
         if temporary.exists(): temporary.unlink()
 
@@ -73,7 +73,7 @@ def private_invitation(path,value):
 
 
 def read(path):
-    return json.loads(path.read_text(encoding='utf-8-sig'))
+    return json.loads(windows_file_retry(lambda: path.read_text(encoding='utf-8-sig')))
 
 
 def read_config(path):

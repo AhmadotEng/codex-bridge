@@ -20,6 +20,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from codex_bridge.tools import TOOLS, TOOLS_BY_NAME, validate_arguments
+from codex_bridge.core import windows_file_retry
 
 SUPPORTED_PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 MAX_LINE_BYTES = 2 * 1024 * 1024
@@ -44,7 +45,7 @@ class LocalBridgeClient:
     def call(self, method: str, params: dict) -> dict:
         request_id = params.get("request_id")
         try:
-            config = json.loads(self.config_path.read_text(encoding="utf-8-sig"))
+            config = json.loads(windows_file_retry(lambda: self.config_path.read_text(encoding="utf-8-sig")))
             port = config.get("listen_port")
             token = config.get("local_token")
             if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
