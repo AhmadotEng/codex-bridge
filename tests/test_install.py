@@ -15,6 +15,7 @@ RUNTIME_FILES = (
     '.codex-plugin/plugin.json',
     'codex_bridge/__init__.py',
     'codex_bridge/artifacts.py',
+    'codex_bridge/autostart.py',
     'codex_bridge/cli.py',
     'codex_bridge/codex_adapter.py',
     'codex_bridge/compatibility.py',
@@ -22,6 +23,7 @@ RUNTIME_FILES = (
     'codex_bridge/local_actions.py',
     'codex_bridge/mcp.py',
     'codex_bridge/onboarding.py',
+    'codex_bridge/processes.py',
     'codex_bridge/tools.py',
     'codex_bridge/transport.py',
     'scripts/bridge.ps1',
@@ -71,6 +73,8 @@ class InstallTests(unittest.TestCase):
             'skills/collaborate/untracked-secrets.txt',
             'skills/collaborate/__pycache__/cached.pyc',
             'tests/private-fixture.json', 'docs/private-notes.md',
+            'THIS-PAIR.md', 'Codex-Bridge-Tailscale-Implementation-Report.md',
+            'docs/tailscale-verification.json',
         )
         for relative in excluded:
             sentinel = self.source / relative
@@ -80,11 +84,14 @@ class InstallTests(unittest.TestCase):
         (self.source / 'README.md').write_text('Public setup instructions', encoding='utf-8')
         (self.source / 'LICENSE').write_text('Public license text', encoding='utf-8')
         (self.source / 'docs' / 'SETUP.md').write_text('Public setup guide', encoding='utf-8')
+        (self.source / 'docs' / 'TAILSCALE.md').write_text('Generic Tailscale guide', encoding='utf-8')
+        (self.source / 'config.tailscale.example.json').write_text('{"placeholder":true}', encoding='utf-8')
 
         result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
         installed = {p.relative_to(self.target).as_posix() for p in self.target.rglob('*') if p.is_file()}
-        self.assertEqual(installed, set(RUNTIME_FILES) | {'.mcp.json', 'README.md', 'LICENSE', 'docs/SETUP.md'})
+        self.assertEqual(installed, set(RUNTIME_FILES) | {'.mcp.json', 'README.md', 'LICENSE', 'docs/SETUP.md',
+                         'docs/TAILSCALE.md', 'config.tailscale.example.json'})
         self.assertTrue(json.loads(result.stdout)['registration_required'])
         self.assertEqual((self.target / 'docs' / 'SETUP.md').read_text(encoding='utf-8'), 'Public setup guide')
         for relative in RUNTIME_FILES:

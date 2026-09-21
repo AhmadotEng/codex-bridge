@@ -11,14 +11,16 @@ import sys
 REQUIRED = (
     ".codex-plugin/plugin.json", "codex_bridge/__init__.py", "codex_bridge/cli.py",
     "codex_bridge/codex_adapter.py", "codex_bridge/compatibility.py", "codex_bridge/core.py",
-    "codex_bridge/artifacts.py", "codex_bridge/local_actions.py", "codex_bridge/mcp.py",
+    "codex_bridge/artifacts.py", "codex_bridge/autostart.py", "codex_bridge/processes.py",
+    "codex_bridge/local_actions.py", "codex_bridge/mcp.py",
     "codex_bridge/onboarding.py", "codex_bridge/tools.py", "codex_bridge/transport.py",
     "scripts/bridge.ps1", "scripts/install.ps1", "scripts/setup.ps1", "scripts/bridge.sh", "scripts/install.sh",
     "scripts/install.py", "skills/collaborate/SKILL.md",
 )
 OPTIONAL = ("README.md", "LICENSE", "LICENSE.md", "NOTICES", "NOTICES.md", "config.example.json",
             "docs/SETUP.md", "docs/ONBOARDING-PLAN.md", "docs/ADVANCED.md", "docs/SECURITY.md",
-            "docs/TESTING.md", "examples/computer-a.example.json", "examples/computer-b.example.json")
+            "docs/TESTING.md", "docs/TAILSCALE.md", "config.tailscale.example.json",
+            "examples/computer-a.example.json", "examples/computer-b.example.json")
 
 
 def no_links(path: Path, stop: Path | None = None):

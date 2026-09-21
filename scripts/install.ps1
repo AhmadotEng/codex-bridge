@@ -44,6 +44,7 @@ $requiredFiles = @(
     '.codex-plugin\plugin.json',
     'codex_bridge\__init__.py',
     'codex_bridge\artifacts.py',
+    'codex_bridge\autostart.py',
     'codex_bridge\cli.py',
     'codex_bridge\codex_adapter.py',
     'codex_bridge\compatibility.py',
@@ -51,6 +52,7 @@ $requiredFiles = @(
     'codex_bridge\local_actions.py',
     'codex_bridge\mcp.py',
     'codex_bridge\onboarding.py',
+    'codex_bridge\processes.py',
     'codex_bridge\tools.py',
     'codex_bridge\transport.py',
     'scripts\bridge.ps1',
@@ -65,7 +67,7 @@ $optionalFiles = @(
     'README.md', 'LICENSE', 'LICENSE.md', 'NOTICES', 'NOTICES.md',
     'config.example.json',
     'docs\SETUP.md', 'docs\ONBOARDING-PLAN.md', 'docs\ADVANCED.md',
-    'docs\SECURITY.md', 'docs\TESTING.md',
+    'docs\SECURITY.md', 'docs\TESTING.md', 'docs\TAILSCALE.md', 'config.tailscale.example.json',
     'examples\computer-a.example.json', 'examples\computer-b.example.json'
 )
 $selectedFiles = @($requiredFiles)

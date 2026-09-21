@@ -142,7 +142,7 @@ class CodexAdapter:
             self._stderr = asyncio.create_task(self._drain_stderr())
             try:
                 self._initialized = await self._rpc("initialize", {
-                    "clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.2.0"},
+                    "clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.3.0"},
                     "capabilities": {"experimentalApi": self.enable_local_actions},
                 })
                 await self._send({"method": "initialized", "params": {}})

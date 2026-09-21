@@ -1,6 +1,6 @@
 # Codex Bridge
 
-Let two people's Codex installations exchange project tasks, replies, and selected files over SSH.
+Let two people's Codex installations exchange project tasks, replies, and selected files over SSH. The recommended Windows setup uses **ordinary OpenSSH over Tailscale**.
 
 **Use separate Codex accounts.** Each computer keeps its own sign-in, permissions, and project chat. Pair once, then add projects without reinstalling.
 
@@ -8,7 +8,7 @@ This is an independent community project, not an official OpenAI product.
 
 ## Start here
 
-On **both computers**, install Python 3.11+, sign into Codex locally, and download this repository. You also need an existing authorized SSH connection with a verified host key and both local and reverse forwarding allowed.
+On **both computers**, install Python 3.11+, sign into Codex locally, and download this repository. Follow the **[Tailscale connection guide](docs/TAILSCALE.md)** to connect the computers with their own accounts and an authorized SSH key. An existing working SSH route also works.
 
 Open PowerShell in the downloaded source folder:
 
@@ -22,24 +22,26 @@ The assistant detects Python and Codex, checks the App Server schema, registers 
 2. Exchanging private Bridge invitations.
 3. Selecting the existing SSH route on the computer that starts it.
 4. Choosing a local project folder and the paired computer.
+5. Optionally registering Windows startup when you next sign in.
 
 Use the same **project ID** on both computers, with each person's own folder. The default task policy is read-only. Configuration and credentials are generated separately on each PC; never copy one computer's configuration over the other.
 
-**[Full setup guide, including macOS/Linux](docs/SETUP.md)** · [Computer A example](examples/computer-a.example.json) · [Computer B example](examples/computer-b.example.json)
+**[Full setup guide](docs/SETUP.md)** · [Tailscale example](config.tailscale.example.json) · [Computer B example](examples/computer-b.example.json)
 
 ## Connect and check
 
-On both Windows computers:
+On **both Windows computers**, opt into startup at your next Windows sign-in, then start Bridge for this login:
 
 ```powershell
 $bridge = Join-Path $env:USERPROFILE 'plugins\codex-bridge\scripts\bridge.ps1'
+& $bridge autostart-enable
 & $bridge start --interactive
 ```
 
 On the computer that starts SSH:
 
 ```powershell
-& $bridge transport-start
+& $bridge transport-start --peer computer-b
 ```
 
 Then run on both:
@@ -47,11 +49,28 @@ Then run on both:
 ```powershell
 & $bridge preflight --project-id sample-project
 & $bridge status
+& $bridge autostart-status
 ```
 
-Preflight separates runtime, local sign-in, SSH, forwarding, pairing, and project-scope checks. Status hides credentials, workspace paths, prompts, and logs.
+`autostart-enable` registers the local daemon and currently enabled paired transports; it does not start them immediately or automatically include future peers. The guided assistant offers this only as an explicit opt-in.
 
-Windows interactive launch requires the owner to remain signed in. No automatic startup is installed. On macOS/Linux, use the installed `scripts/bridge.sh` and `start --background`.
+**Each Windows owner must sign in after a restart for Codex work to run.** Tailscale's unattended network mode is separate. This is owner-login startup, not a system service running Codex before login.
+
+Preflight separates runtime, local sign-in, SSH, forwarding, pairing, and project-scope checks. Status hides credentials, workspace paths, prompts, and logs. A registered startup task alone does not prove the peer is ready.
+
+On macOS/Linux, use `scripts/bridge.sh` with `start --background` and manual transport startup. The built-in owner-login registration is Windows-only.
+
+## Stop or change startup
+
+| Command | Effect |
+| --- | --- |
+| `stop` | Stop the local daemon for this Windows login |
+| `transport-stop --peer computer-b` | Stop that Bridge SSH route for this login |
+| `start` / `transport-start --peer computer-b` | Explicitly restart the selected component |
+| `autostart-disable` | Disable future login startup while preserving running work |
+| `autostart-status` | Inspect registration and the last observed startup state |
+
+To stop now and remain stopped after future logins, disable startup **and** stop the components. [Removal and rollback](docs/ADVANCED.md#stop-and-uninstall) preserve project work and conversation history.
 
 ## Collaborate
 
@@ -73,7 +92,7 @@ Bridge gives new chats a project title and releases its worker after each turn. 
 
 For another project, run `project-select` on both computers, choose their folders, and create one new session. Existing projects and local action settings are preserved.
 
-For another computer, use `pair-setup` and `transport-config` with its own peer ID and forwarding ports. Each peer has separate trust, project permissions, and SSH supervisor controls.
+For another computer, use `pair-setup` and `transport-config` with its own peer ID and forwarding ports. Enable its startup explicitly with `autostart-enable --component transport --peer PEER_ID` on the SSH owner. Each peer has separate trust, project permissions, and supervisor controls.
 
 ## Available tools
 
@@ -93,6 +112,7 @@ Files up to 8 MiB use the original direct transfer. Larger files use verified, r
 Compatibility is checked against the selected Codex executable's generated App Server schema. An incompatible runtime is refused. Schema compatibility is separate from real account, sandbox, and platform verification; see [test evidence and remaining checks](docs/TESTING.md).
 
 - [Setup, new projects, chat ownership, and troubleshooting](docs/SETUP.md)
+- [Tailscale, Windows OpenSSH, migration, and recovery](docs/TAILSCALE.md)
 - [Implementation of the onboarding plan](docs/ONBOARDING-PLAN.md)
 - [Optional plugin installation, updates, revocation, and uninstall](docs/ADVANCED.md)
 - [Security boundaries](docs/SECURITY.md)

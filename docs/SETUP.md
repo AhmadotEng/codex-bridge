@@ -4,7 +4,9 @@ Call the computer that starts SSH **A**, and the other **B**. Work can flow in e
 
 ## Before setup
 
-You need Python 3.11+, a working local Codex sign-in, and an existing SSH route from A to B. Public-key authentication, a verified host key, and both local/reverse forwarding must already work.
+You need Python 3.11+, a working local Codex sign-in, and an authorized SSH route from A to B. For the recommended Windows route, first follow [ordinary OpenSSH over Tailscale](TAILSCALE.md). It covers device sharing, local keys, pinned host verification, and network startup. An existing verified SSH route also works.
+
+Windows automatic startup also needs `pythonw.exe` beside the selected Python executable. Standard Windows Python installations include it; a custom runtime without it can still use manual startup.
 
 Bridge uses that connection without requesting a remote shell. It does not install SSH, change firewall/router rules, copy private keys, or reconfigure other application tunnels. A forwarding-only relay is not a shell on the destination computer.
 
@@ -25,6 +27,8 @@ If Python is not on PATH, select it explicitly:
 ```
 
 The assistant installs only allowed connector files, checks the local Codex schema, generates this computer's private configuration, and registers its MCP tools. It preserves existing computer identity, pairing, projects, and unrelated Codex settings. A conflicting `codex_bridge` MCP registration is reported for inspection rather than overwritten.
+
+After pairing and project selection, Windows setup offers optional startup for the next owner login, with **no** as the default. Saying yes registers the local daemon and currently enabled paired transports; it does not start them immediately. Existing enabled startup settings are preserved.
 
 Choose short, distinct computer names such as `computer-a` and `computer-b`. These are Bridge identifiers, not your Windows login names.
 
@@ -64,7 +68,7 @@ Pairing is complete only when **both** computers import the other's invitation. 
 
 ## 3. Select the existing SSH route on A
 
-The assistant asks whether this computer starts SSH. On A, supply the existing connection's host, port, SSH account, local identity file, verified known-hosts file, and host-key alias.
+The assistant asks whether this computer starts SSH. On A, supply B's Tailscale IP/full DNS name (or the existing route's address), SSH port and account, local identity file, verified known-hosts file, and host-key alias.
 
 You can also run:
 
@@ -72,7 +76,7 @@ You can also run:
 & $bridge transport-config --peer-id computer-b
 ```
 
-No JSON editing is needed. The original single `ssh_transport` configuration remains supported; new setup uses named `ssh_transports`.
+No JSON editing is needed. The [Tailscale example](../config.tailscale.example.json) is explanatory, with empty credentials and disabled routes. The original single `ssh_transport` configuration remains supported when its peer is unambiguous; new setup uses named `ssh_transports`.
 
 Default forwarding:
 
@@ -101,17 +105,22 @@ The default policy is `read-only`. To explicitly authorize project edits:
 
 Project policies rely on Codex's sandbox; selecting a folder is not a hard barrier against reading everything visible to that operating-system account. See [security boundaries](SECURITY.md). A changed workspace, policy, or capability scope calls for a new collaboration session.
 
-## 5. Start and verify
+## 5. Enable startup, start now, and verify
 
 On both Windows computers, while signed into the desktop:
 
 ```powershell
+& $bridge autostart-enable
 & $bridge start --interactive
 ```
 
-Interactive mode is remembered. It uses a hidden on-demand scheduled task without a password, elevation, or startup trigger. The owner must remain signed in.
+`autostart-enable` opts into future owner-login startup. It registers the daemon and currently configured, enabled paired transports; it does not start them now. Running it again is explicit authorization to refresh that selection. Future peers are not added automatically.
 
-On macOS/Linux, use the installed `scripts/bridge.sh` with `start --background`. For all subsequent examples, substitute that launcher for `& $bridge`.
+The hidden startup tasks run under this Windows owner's interactive login, without storing a password or elevating Codex. Each owner must sign in after reboot and remain signed in for execution. Tailscale unattended mode and automatic OpenSSH startup provide the network layer separately; they do not start Codex before login.
+
+Interactive mode is remembered for later `start` calls. To use manual startup, skip `autostart-enable` and use the same start commands whenever needed.
+
+On macOS/Linux, use the installed `scripts/bridge.sh` with `start --background` and manual transport startup. Built-in login registration is Windows-only. For later non-autostart examples, substitute that launcher for `& $bridge`.
 
 On A:
 
@@ -124,9 +133,10 @@ On both:
 ```powershell
 & $bridge preflight --project-id sample-project
 & $bridge status
+& $bridge autostart-status
 ```
 
-Read the individual checks. A listening SSH port does not prove authentication, forwarding, or a completed Codex task. Run preflight on **both** computers to prove the reverse direction.
+Read the individual checks. A registered task, running process, or listening SSH port does not prove authentication, forwarding, or a completed Codex task. Run preflight on **both** computers to check the reverse direction. Schedule restart/login testing after active work is finished and inspect readiness without manually starting Bridge.
 
 ## 6. Prove collaboration
 
@@ -171,7 +181,11 @@ Ownership is an observation, not a live lock query against the desktop. Automati
 
 ## Everyday use and another project
 
-On both computers use `start`; on A also use `transport-start`. For another project, repeat `project-select` on both, then create one new session. Installation and pairing stay the same. Reuse a project's session for follow-up work.
+With owner-login startup enabled, each Windows owner signs in and checks `status` and `preflight`. For manual operation, use `start` on both computers and `transport-start` on A.
+
+`stop` and `transport-stop --peer ID` deliberately stop the selected component for this Windows login; an explicit start resumes it. Future enabled logins can start it again. `autostart-disable` disables future startup while preserving running work. Use both disable and stop when you want it to stay off now and after later logins.
+
+For another project, repeat `project-select` on both, then create one new session. Installation, pairing, and startup stay the same. Reuse a project's session for follow-up work.
 
 `status` is safe by default. `diagnostics` and `session_get` are more detailed and may include project information.
 
@@ -182,10 +196,11 @@ Use a new peer ID with `pair-setup`, then `transport-config` for that peer on th
 ```powershell
 & $bridge transport-start --peer computer-c
 & $bridge transport-status --peer computer-c
+& $bridge autostart-enable --component transport --peer computer-c
 & $bridge transport-stop --peer computer-c
 ```
 
-Without `--peer`, transport controls apply to configured transports. Stopping one peer leaves the others running. Revocation stops that peer's supervisor and denies new Bridge operations.
+Enable startup for the new route deliberately. Without `--peer`, transport controls apply to configured transports. Stopping one peer leaves the others running. Revocation stops that peer's supervisor and denies new Bridge operations.
 
 ## Troubleshooting
 
@@ -193,8 +208,11 @@ Without `--peer`, transport controls apply to configured transports. Stopping on
 | --- | --- |
 | Runtime schema incompatible | Select a compatible local Codex executable; do not bypass the check |
 | Local sign-in missing | Sign into Codex on that computer, then rerun preflight |
+| Startup enabled but no Codex execution | Sign into the owning Windows account and inspect `autostart-status`; network services alone are insufficient |
 | Local Bridge unavailable | Start its daemon and check for an occupied listen port |
+| Bridge remains stopped after deliberate stop | Use an explicit `start` or `transport-start`; the current-login stop is intentional |
 | SSH endpoint unavailable | Restore the existing SSH/tunnel connection |
+| Tailscale works until node authentication expires | Reauthenticate locally; startup does not renew expired node credentials |
 | SSH authentication or host-key failure | Inspect the existing key and verified host entry locally |
 | Forwarding unavailable | Check both daemons, forwarding permission, and matching ports |
 | Pairing mismatch | Verify both invitation imports and the expected computer IDs |

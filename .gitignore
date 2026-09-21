@@ -49,6 +49,8 @@ bridge-import/
 *.apk
 *.obb
 /THIS-PAIR.md
+/Codex-Bridge-Tailscale-Implementation-Report.md
+/docs/tailscale-verification.json
 /docs/verification.json
 # Editors and OS
 .idea/

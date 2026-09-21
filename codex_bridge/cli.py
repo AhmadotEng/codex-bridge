@@ -17,6 +17,7 @@ import urllib.request
 import uuid
 
 from .core import Bridge, BridgeError, canonical, identifier, now, windows_file_retry
+from . import processes
 
 
 def config_path():
@@ -46,18 +47,9 @@ def save(path,data):
 
 
 def process_alive(pid):
-    if os.name=='nt':
-        import ctypes
-        kernel=ctypes.WinDLL('kernel32',use_last_error=True)
-        kernel.OpenProcess.restype=ctypes.c_void_p
-        handle=kernel.OpenProcess(0x1000,False,int(pid))
-        if not handle: return False
-        try:
-            code=ctypes.c_ulong()
-            return bool(kernel.GetExitCodeProcess(ctypes.c_void_p(handle),ctypes.byref(code))) and code.value==259
-        finally: kernel.CloseHandle(ctypes.c_void_p(handle))
-    try: os.kill(pid,0); return True
-    except OSError: return False
+    # Compatibility helper for a freshly owned PID. Persistent records require
+    # the creation identity, not just a PID that Windows may already have reused.
+    return processes.identity(pid) is not None
 
 
 def private_invitation(path,value):
@@ -225,20 +217,23 @@ def launch_interactive(path):
 
 
 def wait_for_exit(pid_file,seconds=15):
-    if not pid_file.exists(): return True
-    pid=read(pid_file).get('pid')
     deadline=time.monotonic()+seconds
-    while pid and process_alive(pid) and time.monotonic()<deadline:
+    while record_status(pid_file,pid_lock_path(pid_file))['running'] and time.monotonic()<deadline:
         time.sleep(.1)
-    return not pid or not process_alive(pid)
+    return not record_status(pid_file,pid_lock_path(pid_file))['running']
 
 
-def start_daemon(path,interactive=None):
+def _start_daemon(path,interactive=None):
+    from . import autostart
     cfg=read_config(path)
     if interactive is not None:
         if interactive and os.name!='nt': raise BridgeError('configuration','Interactive launch requires Windows')
         cfg['launch_mode']='interactive' if interactive else 'background'
         save(path,cfg)
+    if autostart.stop_path(path,'daemon').exists():
+        if record_status(Path(cfg['state_dir'])/'serve.pid.json',Path(cfg['state_dir'])/'serve.lock')['running'] or record_status(autostart.runner_record(path,'daemon'),autostart.runner_lock(path,'daemon'))['running']:
+            raise BridgeError('still_stopping','The previous daemon is still stopping; retry after it exits')
+        autostart.clear_stop(path,'daemon')
     try:
         # This probe must never wait for peers or SSH; a healthy offline bridge is running.
         existing=valid_response(call(path,'session_list',{},timeout=2))
@@ -248,11 +243,17 @@ def start_daemon(path,interactive=None):
     mode=cfg.get('launch_mode','background')
     if mode not in ('background','interactive'): raise BridgeError('configuration','launch_mode must be background or interactive')
     process=None
-    if mode=='interactive':
+    if autostart.enabled(path,'daemon'):
+        result=autostart.start(path,'daemon')
+    elif mode=='interactive':
         result=launch_interactive(path)
     else:
         process=launch(path,'serve')
         result={'pid':process.pid,'launch_mode':'background'}
+    return process,result,mode
+
+
+def _wait_daemon_ready(path,process,result,mode):
     deadline=time.monotonic()+30
     while time.monotonic()<deadline:
         if process and process.poll() is not None:
@@ -268,6 +269,35 @@ def start_daemon(path,interactive=None):
         except OSError:
             time.sleep(.25)
     raise BridgeError('startup_timeout','Bridge did not become ready; inspect state/serve.stderr.log. Interactive mode requires this Windows user to be signed in.')
+
+
+@contextmanager
+def daemon_control(path):
+    lock=Path(read_config(path)['state_dir'])/'serve-start.lock'
+    deadline=time.monotonic()+5
+    while True:
+        manager=process_lock(lock)
+        try: manager.__enter__(); break
+        except BridgeError as exc:
+            if exc.code!='already_running': raise
+            if time.monotonic()>=deadline:
+                raise BridgeError('component_start_in_progress','Daemon start or stop is in progress; retry this command',True) from exc
+            time.sleep(.05)
+    try: yield
+    finally: manager.__exit__(None,None,None)
+
+
+def start_daemon(path,interactive=None):
+    from . import autostart
+    if autostart.stop_path(path,'daemon').exists():
+        state=Path(read_config(path)['state_dir'])
+        if not wait_for_exit(state/'serve.pid.json',seconds=15) or not wait_for_exit(autostart.runner_record(path,'daemon'),seconds=5):
+            raise BridgeError('still_stopping','The previous daemon is still stopping; retry after it exits')
+    with daemon_control(path):
+        result=_start_daemon(path,interactive)
+    # A login runner needs the same control lock for its marker check. Release
+    # it before waiting for readiness; keep every marker mutation serialized.
+    return _wait_daemon_ready(path,*result) if isinstance(result,tuple) else result
 
 
 def transport_args(cfg):
@@ -361,6 +391,38 @@ async def configure_tool_approvals(path,marketplace,mode):
         await adapter.close()
 
 
+def lock_held(path):
+    if not path.exists(): return False
+    try:
+        with process_lock(path): pass
+        return False
+    except BridgeError as exc:
+        if exc.code=='already_running': return True
+        raise
+
+
+
+def record_status(pid_file,lock_file=None):
+    try: record=read(pid_file) if pid_file.exists() else {}
+    except (ValueError,OSError): record={}
+    verified=processes.matches(record)
+    held=bool(lock_file and lock_held(lock_file))
+    return {'pid':record.get('pid') if verified else None,'running':verified or held,
+            'identity_verified':verified,'lock_held':held,
+            'stale_pid_record':bool(record and not verified)}
+
+
+
+def pid_lock_path(pid_file):
+    name={'serve.pid.json':'serve.lock','transport-run.pid.json':'transport.lock',
+          'supervisor.pid.json':'supervisor.lock','autostart.pid.json':'autostart.lock',
+          'launch.pid.json':'start.lock'}.get(pid_file.name)
+    if name is None and pid_file.name.startswith('autostart-') and pid_file.name.endswith('.pid.json'):
+        name=pid_file.name.removesuffix('.pid.json')+'.lock'
+    return pid_file.with_name(name) if name else None
+
+
+
 def main(argv=None):
     parser=argparse.ArgumentParser(description='Codex Bridge local setup and administration')
     parser.add_argument('--config',type=Path,default=config_path())
@@ -394,6 +456,13 @@ def main(argv=None):
     launch_mode.add_argument('--background',action='store_true',help='Persist normal detached process launch mode')
     for name in ('serve','stop','status','diagnostics'):
         sub.add_parser(name)
+    enable=sub.add_parser('autostart-enable',help='Register hidden owner-login tasks without starting work now')
+    enable.add_argument('--component',choices=['daemon','transport','auto','all'],default='auto'); enable.add_argument('--peer')
+    disable=sub.add_parser('autostart-disable',help='Disable future login startup without stopping active work')
+    disable.add_argument('--component',choices=['daemon','transport','auto','all'],default='all'); disable.add_argument('--peer'); disable.add_argument('--remove',action='store_true')
+    startup_status=sub.add_parser('autostart-status',help='Inspect owner-login registrations and exact process ownership'); startup_status.add_argument('--peer')
+    runner=sub.add_parser('autostart-run',help=argparse.SUPPRESS)
+    runner.add_argument('--component',choices=['daemon','transport'],required=True); runner.add_argument('--peer')
     for name in ('transport-start','transport-stop','transport-status','transport-run'):
         transport_parser=sub.add_parser(name)
         transport_parser.add_argument('--peer',required=(name=='transport-run'),help='Select one configured peer; omit to operate on all configured peers')
@@ -475,17 +544,26 @@ def main(argv=None):
             cfg=read_config(path)
             state=Path(cfg['state_dir'])
             with process_lock(state/'serve.lock'):
-                save(state/'serve.pid.json',{'pid':os.getpid(),'created_at':now(),'config':str(path)})
-                asyncio.run(Bridge(path).serve())
+                if (state/'serve.stop').exists(): return 0
+                record=processes.record(os.getpid(),created_at=now(),config=str(path))
+                save(state/'serve.pid.json',record)
+                try: asyncio.run(Bridge(path).serve())
+                finally:
+                    if (state/'serve.pid.json').exists() and read(state/'serve.pid.json')==record:
+                        windows_file_retry(lambda: (state/'serve.pid.json').unlink(missing_ok=True))
             return 0
         elif args.command=='start':
             result=start_daemon(path,True if args.interactive else False if args.background else None)
         elif args.command=='stop':
+            from . import autostart
             cfg=read_config(path)
-            try: result=valid_response(call(path,'shutdown'))
-            except OSError:
-                result={'ok':True,'already_unreachable':True}
+            with daemon_control(path):
+                autostart.request_stop(path,'daemon')
+                try: result=valid_response(call(path,'shutdown'))
+                except OSError:
+                    result={'ok':True,'already_unreachable':True}
             stopped=wait_for_exit(Path(cfg['state_dir'])/'serve.pid.json',seconds=15)
+            stopped=wait_for_exit(autostart.runner_record(path,'daemon'),seconds=5) and stopped
             result.update(stopped=stopped,stopping=not stopped)
         elif args.command=='status':
             result=call(path,'bridge_status')
@@ -501,6 +579,12 @@ def main(argv=None):
                 result={'revoked':True,'peer_id':args.peer_id,'daemon_was_offline':True}
         elif args.command=='tool-approvals':
             result=asyncio.run(configure_tool_approvals(path,args.marketplace,args.mode))
+        elif args.command.startswith('autostart-'):
+            from . import autostart
+            if args.command=='autostart-enable': result=autostart.enable(path,args.component,args.peer)
+            elif args.command=='autostart-disable': result=autostart.disable(path,args.component,args.remove,args.peer)
+            elif args.command=='autostart-status': result=autostart.status(path,args.peer)
+            else: return autostart.run(path,args.component,args.peer)
         elif args.command in ('transport-run','transport-start','transport-stop','transport-status'):
             from . import transport
             if args.command=='transport-run':
@@ -515,7 +599,7 @@ def main(argv=None):
         print(json.dumps(result,indent=2,ensure_ascii=False))
         return 1 if isinstance(result,dict) and result.get('ok') is False else 0
     except Exception as exc:
-        safe_commands={'setup','pair-setup','project-select','transport-config','preflight','show-chat','status','transport-status'}
+        safe_commands={'setup','pair-setup','project-select','transport-config','preflight','show-chat','status','transport-status','autostart-status','autostart-enable','autostart-disable'}
         if args.command in safe_commands and not isinstance(exc,BridgeError):
             error={'code':'local_check_failed','message':'The local operation could not complete. Verify the selected files and configuration, then run setup or preflight.', 'retryable':False}
         else:

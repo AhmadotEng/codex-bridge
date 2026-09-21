@@ -16,6 +16,7 @@ import threading
 import time
 
 from .core import BridgeError, canonical, identifier, now
+from . import processes
 
 
 def classify_ssh_error(stderr: str | bytes) -> str:
@@ -171,26 +172,31 @@ def _read_record(path):
 
 
 def transport_status(path: str | Path, peer_id: str | None = None) -> dict:
-    from .cli import read_config, process_alive
+    from .cli import read_config, record_status
     cfg = read_config(Path(path))
     transports = configured_transports(cfg)
     states = []
     for peer in _selected(cfg, peer_id):
         directory = transport_directory(cfg, peer)
-        supervisor = _read_record(directory / "supervisor.pid.json").get("pid")
-        child = _read_record(directory / "ssh.pid.json").get("pid")
+        supervisor = record_status(directory / "supervisor.pid.json", directory / "supervisor.lock")
+        child = record_status(directory / "ssh.pid.json")
+        launching = record_status(directory / "launch.pid.json")
         current = _read_record(directory / "status.json")
-        running = bool(supervisor and process_alive(supervisor))
+        running = supervisor['running']
         states.append({"peer_id": peer, "enabled": bool(transports[peer].get("enabled")),
                        "paired": bool(cfg["peers"][peer].get("enabled")),
                        "stop_requested": (directory / "stop").exists(),
-                       "supervisor_running": running, "ssh_running": bool(child and process_alive(child)),
+                       "supervisor_running": running, "ssh_running": child['identity_verified'],
+                       "launch_pending": launching['running'] and not running,
+                       "supervisor_identity_verified": supervisor['identity_verified'],
+                       "ssh_identity_verified": child['identity_verified'],
+                       "stale_process_record": supervisor['stale_pid_record'] or child['stale_pid_record'],
                        "state": current.get("state", "starting") if running or current.get("state") == "failed" else "stopped",
                        "updated_at": current.get("updated_at"), "last_error": current.get("last_error")})
     # Keep awareness of a pre-upgrade single supervisor. Never kill it using a
     # stale PID or start competing local forwards; owner stops it before upgrade.
-    legacy_pid = _read_record(Path(cfg["state_dir"]) / "transport-run.pid.json").get("pid")
-    legacy_running = bool(legacy_pid and process_alive(legacy_pid))
+    state = Path(cfg['state_dir'])
+    legacy_running = record_status(state / 'transport-run.pid.json', state / 'transport.lock')['running']
     return {"transports": states, "legacy_supervisor_running": legacy_running,
             "note": "Process state alone does not verify forwarding; peer_status checks bridge authentication and reachability."}
 
@@ -213,11 +219,53 @@ def _launch(path, peer_id, directory):
 def _spawn_ssh(args):
     options = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.PIPE}
     if os.name == "nt": options["creationflags"] = subprocess.CREATE_NO_WINDOW
-    return subprocess.Popen(args, **options)
+    return processes.OwnedProcess(args, **options)
+
+
+def _peer_processes(path, peer, directory):
+    from . import autostart
+    from .cli import record_status
+    return {
+        'supervisor': record_status(directory / 'supervisor.pid.json', directory / 'supervisor.lock'),
+        'launcher': record_status(directory / 'launch.pid.json'),
+        'runner': record_status(autostart.runner_record(path, 'transport', peer_id=peer),
+                                autostart.runner_lock(path, 'transport', peer_id=peer)),
+    }
+
+
+def _wait_peer_stopped(path, peer, directory, timeout):
+    deadline = time.monotonic() + timeout
+    while True:
+        states = _peer_processes(path, peer, directory)
+        if not any(item['running'] for item in states.values()):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(.1)
+
+
+def _request_peer_stop(path, peer, directory, deadline):
+    from . import autostart
+    from .cli import process_lock
+    # An explicit stop must not land between a start's marker check and clear.
+    # Both commands serialize their intent on this peer's launch decision lock.
+    while True:
+        try:
+            with process_lock(directory / 'start.lock'):
+                autostart.request_stop(path, 'transport', peer_id=peer)
+            return
+        except BridgeError as exc:
+            if exc.code != 'already_running':
+                raise
+            if time.monotonic() >= deadline:
+                raise BridgeError('transport_start_in_progress',
+                    'This peer is completing a start request; retry transport-stop when it finishes', True) from exc
+            time.sleep(.05)
 
 
 def start_transports(path: str | Path, peer_id: str | None = None) -> dict:
-    from .cli import read_config, process_alive
+    from . import autostart
+    from .cli import read_config, process_lock, save
     path = Path(path)
     cfg = read_config(path)
     transports = validate_transports(cfg, check_files=False)
@@ -230,14 +278,27 @@ def start_transports(path: str | Path, peer_id: str | None = None) -> dict:
             if not transports[peer].get("enabled") or not cfg["peers"][peer].get("enabled"):
                 results.append({"peer_id": peer, "started": False, "state": "disabled"}); continue
             transport_args(cfg, peer)
-            record = _read_record(directory / "supervisor.pid.json")
-            if record.get("pid") and process_alive(record["pid"]):
-                if (directory / "stop").exists():
-                    raise BridgeError("still_stopping", "The selected peer transport is still stopping")
-                results.append({"peer_id": peer, "already_running": True}); continue
-            (directory / "stop").unlink(missing_ok=True)
-            proc = _launch(path, peer, directory)
-            results.append({"peer_id": peer, "started": True, "pid": proc.pid, "ssh_connection_verified": False})
+            # Serialize launch decisions as well as the supervisor lifetime. A
+            # freshly spawned process is recorded with its OS creation identity
+            # before another launcher can observe the startup window.
+            with process_lock(directory / 'start.lock'):
+                if (directory / 'stop').exists() and not _wait_peer_stopped(path, peer, directory, 15):
+                    raise BridgeError('still_stopping', 'The selected peer transport or login runner is still stopping')
+                states = _peer_processes(path, peer, directory)
+                if any(item['running'] for item in states.values()):
+                    results.append({'peer_id': peer, 'already_running': True,
+                                    'ssh_connection_verified': False})
+                    continue
+                autostart.clear_stop(path, 'transport', peer_id=peer)
+                if autostart.enabled(path, 'transport', peer_id=peer):
+                    result = autostart.start(path, 'transport', peer_id=peer)
+                    results.append({'peer_id': peer, **result, 'started': False,
+                                    'ssh_connection_verified': False})
+                else:
+                    proc = _launch(path, peer, directory)
+                    save(directory / 'launch.pid.json', processes.record(proc.pid, created_at=now(), peer_id=peer))
+                    results.append({'peer_id': peer, 'started': True, 'pid': proc.pid,
+                                    'ssh_connection_verified': False})
         except (BridgeError, OSError) as exc:
             if peer_id is not None: raise
             error = exc.as_dict() if isinstance(exc, BridgeError) else {"code": "transport_start_failed", "message": "This peer transport could not start; inspect its local settings", "retryable": True}
@@ -246,29 +307,42 @@ def start_transports(path: str | Path, peer_id: str | None = None) -> dict:
 
 
 def stop_transports(path: str | Path, peer_id: str | None = None, *, timeout: float = 10) -> dict:
-    from .cli import read_config, process_alive
+    from .cli import read_config, record_status
     cfg = read_config(Path(path))
     directories = []
+    errors = []
+    deadline = time.monotonic() + timeout
     for peer in _selected(cfg, peer_id):
         directory = transport_directory(cfg, peer); directory.mkdir(parents=True, exist_ok=True)
-        (directory / "stop").touch(); directories.append((peer, directory))
+        try:
+            _request_peer_stop(path, peer, directory, deadline)
+            directories.append((peer, directory))
+        except (BridgeError, OSError) as exc:
+            if peer_id is not None:
+                raise
+            error = exc.as_dict() if isinstance(exc, BridgeError) else {
+                'code': 'transport_stop_failed', 'message': 'Could not persist this peer stop request', 'retryable': True}
+            errors.append({'peer_id': peer, 'stop_requested': False, 'stopped': False, 'error': error})
     # Legacy supervisor knows its old stop marker. It can only be stopped by an
     # all-peers operation or the peer selected by its legacy configuration.
     legacy = cfg.get("ssh_transport")
     stop_legacy = peer_id is None or (legacy and peer_id in configured_transports(cfg) and peer_id not in cfg.get("ssh_transports", {}))
     if stop_legacy:
         (Path(cfg["state_dir"]) / "transport.stop").touch()
-    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        active = any((record := _read_record(directory / "supervisor.pid.json")).get("pid") and process_alive(record["pid"]) for _, directory in directories)
-        old = _read_record(Path(cfg["state_dir"]) / "transport-run.pid.json")
-        if stop_legacy and old.get("pid") and process_alive(old["pid"]): active = True
+        active = any(any(item['running'] for item in _peer_processes(path, peer, directory).values())
+                     for peer, directory in directories)
+        old_state = Path(cfg['state_dir'])
+        if stop_legacy and record_status(old_state / 'transport-run.pid.json', old_state / 'transport.lock')['running']:
+            active = True
         if not active:
             break
         time.sleep(.1)
-    legacy_record = _read_record(Path(cfg["state_dir"]) / "transport-run.pid.json")
-    return {"legacy_stopped": not bool(legacy_record.get("pid") and process_alive(legacy_record["pid"])), "transports": [{"peer_id": peer, "stop_requested": True,
-            "stopped": not bool((record := _read_record(directory / "supervisor.pid.json")).get("pid") and process_alive(record["pid"]))} for peer, directory in directories]}
+    state = Path(cfg['state_dir'])
+    return {'ok': not errors, 'legacy_stopped': not record_status(state / 'transport-run.pid.json', state / 'transport.lock')['running'],
+            'transports': [{'peer_id': peer, 'stop_requested': True,
+                           'stopped': not any(item['running'] for item in _peer_processes(path, peer, directory).values())}
+                          for peer, directory in directories] + errors}
 
 
 def supervise_transport(path: str | Path, peer_id: str) -> dict:
@@ -279,9 +353,10 @@ def supervise_transport(path: str | Path, peer_id: str) -> dict:
     directory = transport_directory(cfg, peer_id); directory.mkdir(parents=True, exist_ok=True)
     stop = directory / "stop"
     with process_lock(directory / "supervisor.lock"):
-        save(directory / "supervisor.pid.json", {"pid": os.getpid(), "created_at": now()})
+        save(directory / 'supervisor.pid.json', processes.record(os.getpid(), created_at=now(), peer_id=peer_id))
         delay = 1
         child = None
+        owner = None
         errors = None
         def status(state, error=None):
             save(directory / "status.json", {"state": state, "updated_at": now(), "last_error": error})
@@ -295,19 +370,18 @@ def supervise_transport(path: str | Path, peer_id: str) -> dict:
                 args = transport_args(cfg, peer_id)
                 status("connecting")
                 began = time.monotonic()
-                child = _spawn_ssh(args)
+                owner = _spawn_ssh(args)
+                child = owner.process
                 errors = _BoundedErrors(child.stderr)
-                save(directory / "ssh.pid.json", {"pid": child.pid, "created_at": now()})
+                save(directory / 'ssh.pid.json', processes.record(child.pid, created_at=now(), peer_id=peer_id))
                 status("forwarding_unverified")
                 while child.poll() is None and not stop.exists():
                     latest = read_config(path)
                     if not latest.get("peers", {}).get(peer_id, {}).get("enabled") or configured_transports(latest).get(peer_id) != t:
                         break
                     time.sleep(.25)
-                if child.poll() is None:
-                    child.terminate()
-                    try: child.wait(timeout=5)
-                    except subprocess.TimeoutExpired: child.kill(); child.wait(timeout=5)
+                owner.close()
+                owner = None
                 error_code = errors.finish()
                 errors = None
                 if stop.exists(): break
@@ -320,10 +394,8 @@ def supervise_transport(path: str | Path, peer_id: str) -> dict:
             status("failed", {"code": getattr(exc, "code", "ssh_start_failed"), "message": "SSH transport could not continue; check local settings and forwarding permissions"})
             raise
         finally:
-            if child is not None and child.poll() is None:
-                child.terminate()
-                try: child.wait(timeout=5)
-                except subprocess.TimeoutExpired: child.kill(); child.wait(timeout=5)
+            if owner is not None:
+                owner.close()
             if errors is not None: errors.finish()
             (directory / "ssh.pid.json").unlink(missing_ok=True)
             (directory / "supervisor.pid.json").unlink(missing_ok=True)

@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 MAX_FILE = 8 * 1024 * 1024
 MAX_HTTP = 12 * 1024 * 1024
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted', 'uncertain'}

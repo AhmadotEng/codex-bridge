@@ -15,6 +15,7 @@ Account authentication, computer pairing, and project permissions are separate. 
 | `~/.codex-bridge/config.json` | Different identity, credentials, runtime, scopes | Setup assistant |
 | `~/.codex-bridge/state/` | Different requests, progress, and local state | Bridge |
 | Private invitations | One Bridge credential from each computer | `pair-setup` |
+| Optional Windows login tasks | Owner-specific daemon and selected peer routes | Explicit `autostart-enable` |
 | SSH identity and known-host files | Existing local files; private key stays local | Each SSH owner |
 | Project and transfer folders | Locally selected | `project-select` |
 | Conversation IDs | One local conversation per participating computer/session | First received task |
@@ -53,3 +54,11 @@ Use separate local accounts and empty workspaces. Verify both directions, retain
 Open a finished worker chat without a lingering Bridge writer. While the desktop owns it, confirm Bridge reports `conversation_in_use` without taking it over. Treat completed results and file hashes as evidence; a queued request or connected tunnel alone is insufficient.
 
 Automated fresh-directory tests cover the setup and protocol boundaries. Real local Codex tests check title persistence, retained context, and writer release. Final acceptance by two new human users with separate accounts remains a distinct deployment check.
+
+## Tailscale and owner-login startup — integrated in 0.3
+
+The recommended Windows path now documents ordinary OpenSSH over Tailscale, including device sharing, independent local keys, pinned host verification, unattended network mode, and matching loopback forwards. The generic `config.tailscale.example.json` uses the existing named transport format.
+
+Setup offers explicit optional Windows startup after pairing and project selection, defaulting to no and preserving existing enabled registrations. `autostart-enable` registers future owner-login startup without starting work immediately. Daemon and per-peer transports have separate lifecycle controls; deliberate stop, disable, removal, and recovery are distinct operations.
+
+The earlier deployed 0.1 migration passed actual reboot/login recovery on both computers and retained existing sessions. That is supporting deployment evidence, not a claim that the integrated 0.3 package has passed the same two-computer reboot exercise. The [verification record](TESTING.md) distinguishes source tests, deployed evidence, and remaining sign-out, lock, sleep, and fresh-user checks.

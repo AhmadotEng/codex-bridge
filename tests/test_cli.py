@@ -58,6 +58,22 @@ class CLITests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 'unauthorized')
         launch.assert_not_called()
 
+    def test_start_releases_control_lock_before_waiting_for_runner_readiness(self):
+        with mock.patch.object(cli, '_start_daemon', return_value=(None, {'launch_mode': 'owner-login-task'}, 'background')):
+            def ready(*args):
+                with cli.process_lock(self.state/'serve-start.lock'): pass
+                return {'ready': True}
+            with mock.patch.object(cli, '_wait_daemon_ready', side_effect=ready):
+                self.assertTrue(cli.start_daemon(self.path)['ready'])
+
+    def test_autostart_status_failure_does_not_print_private_config_paths(self):
+        private = self.root/'private-personal-folder'/'config.json'
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            result = cli.main(['--config',str(private),'autostart-status'])
+        self.assertEqual(result,1)
+        self.assertNotIn('private-personal-folder',output.getvalue())
+
     def test_daemon_lifetime_lock_prevents_second_journal_open(self):
         with cli.process_lock(self.state / 'serve.lock'):
             with mock.patch.object(cli, 'Bridge') as bridge, contextlib.redirect_stderr(io.StringIO()):

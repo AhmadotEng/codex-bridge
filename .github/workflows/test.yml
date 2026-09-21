@@ -16,6 +16,9 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
         python: ['3.11', '3.13']
+        include:
+          - os: windows-latest
+            python: '3.14'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:

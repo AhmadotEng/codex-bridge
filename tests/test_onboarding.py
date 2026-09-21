@@ -367,6 +367,51 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(call.call_args.args[1], 'bridge_status')
         self.assertNotIn('PRIVATE-PATH', captured.getvalue())
 
+    def prepared_startup_scope(self):
+        self.paired()
+        onboarding.project_select(self.a, project_id='sample', workspace=self.workspace,
+                                  peer_id='computer-b', batch=True)
+
+    def test_guided_startup_defaults_to_no_without_changing_configuration(self):
+        self.prepared_startup_scope()
+        before = self.a.read_bytes()
+        register = mock.Mock()
+        result = onboarding.offer_autostart(self.a, {'ok': True}, platform='nt',
+            prompt=lambda _: '', read_settings=lambda _: {'components': {}, 'transports': {}}, register=register)
+        register.assert_not_called()
+        self.assertEqual(result['autostart']['choice'], 'not_enabled')
+        self.assertEqual(before, self.a.read_bytes())
+        self.assertFalse((self.a.parent / 'state' / 'autostart.json').exists())
+
+    def test_guided_startup_yes_registers_only_and_preserves_existing_startup(self):
+        self.prepared_startup_scope()
+        register = mock.Mock(return_value={'enabled': True, 'started_now': False})
+        with mock.patch.object(cli, 'start_daemon') as start:
+            result = onboarding.offer_autostart(self.a, {'ok': True}, platform='nt',
+                prompt=lambda _: 'yes', read_settings=lambda _: {'components': {}}, register=register)
+        register.assert_called_once_with(self.a, component='auto')
+        start.assert_not_called()
+        self.assertFalse(result['autostart']['started_now'])
+        register.reset_mock()
+        prompt = mock.Mock(side_effect=AssertionError('Existing startup must not be silently replaced'))
+        result = onboarding.offer_autostart(self.a, {'ok': True}, platform='nt', prompt=prompt,
+            read_settings=lambda _: {'components': {}, 'transports': {'computer-b': {'enabled': True}}}, register=register)
+        self.assertTrue(result['autostart']['existing_registration_preserved'])
+        register.assert_not_called()
+        prompt.assert_not_called()
+
+    def test_startup_is_not_offered_before_pairing_project_or_on_other_platforms(self):
+        self.initialize()
+        prompt = mock.Mock(side_effect=AssertionError('Startup is not ready to be offered'))
+        register = mock.Mock()
+        result = onboarding.offer_autostart(self.a, {'ok': True}, platform='nt', prompt=prompt,
+            read_settings=lambda _: {'components': {}}, register=register)
+        self.assertFalse(result['autostart']['offered'])
+        result = onboarding.offer_autostart(self.a, {'ok': True}, platform='posix', prompt=prompt, register=register)
+        self.assertNotIn('autostart', result)
+        prompt.assert_not_called()
+        register.assert_not_called()
+
     @unittest.skipUnless(os.name == 'nt', 'Windows entry point')
     def test_setup_launcher_parses_without_executing_installation(self):
         script = Path(__file__).resolve().parents[1] / 'scripts' / 'setup.ps1'

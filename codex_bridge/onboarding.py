@@ -168,8 +168,9 @@ def setup(path, *, peer_id=None, codex=None, port=None, batch=False, prompt=inpu
               'runtime_compatibility': runtime.get('compatibility'),
               'authentication': auth_status(selected_codex, runner=runner),
               'next_steps': ['Pair computers with pair-setup.',
-                             'Select the existing SSH route with transport-config on its owner.',
+                             'Select the existing SSH route with transport-config on its owner; the Tailscale guide covers ordinary OpenSSH over Tailscale.',
                              'Select a workspace with project-select on both computers.',
+                             'Optionally register owner-login startup with autostart-enable on Windows; this does not start Bridge now.',
                              'Start Bridge on both computers; start the SSH transport on its owner; run preflight.']}
     if register:
         result['registration'] = register_mcp(selected_codex, path, runner=runner)
@@ -199,6 +200,34 @@ def continue_setup(path, result, *, prompt=input):
     selected = ask('Project ID (leave blank to select later)', prompt=prompt, required=False)
     if selected:
         result['project'] = project_select(path, project_id=selected, peer_id=peer, prompt=prompt)
+    return offer_autostart(path, result, prompt=prompt)
+
+
+def offer_autostart(path, result, *, prompt=input, platform=None, register=None, read_settings=None):
+    """Owner-only, explicit opt-in after pairing/project selection; never starts work."""
+    if (platform or os.name) != 'nt':
+        return result
+    from . import autostart
+    configured = (read_settings or autostart.settings)(path)
+    entries = [*configured.get('components', {}).values(), *configured.get('transports', {}).values()]
+    if any(isinstance(entry, dict) and entry.get('enabled') for entry in entries):
+        result['autostart'] = {'changed': False, 'existing_registration_preserved': True,
+                               'next_step': 'Use autostart-status to inspect existing startup. Add new peer transports explicitly with autostart-enable --component transport --peer PEER_ID.'}
+        return result
+    cfg = _admin().read_config(Path(path))
+    if not cfg.get('projects') or not any(peer.get('enabled') for peer in cfg.get('peers', {}).values()):
+        result['autostart'] = {'changed': False, 'offered': False,
+                               'next_step': 'Complete pairing and project selection, then use autostart-enable to opt into Windows owner-login startup.'}
+        return result
+    choice = ask('Register Bridge and its currently enabled peer transports for your next Windows sign-in? This does not start anything now. yes/no',
+                 'no', prompt=prompt).casefold()
+    if choice in ('yes', 'y'):
+        result['autostart'] = (register or autostart.enable)(path, component='auto')
+    elif choice in ('no', 'n'):
+        result['autostart'] = {'changed': False, 'offered': True, 'choice': 'not_enabled',
+                               'next_step': 'You can opt in later with autostart-enable. Start Bridge manually for this login.'}
+    else:
+        raise BridgeError('invalid_choice', 'Startup was not changed. Answer yes or no, or run autostart-enable explicitly later.')
     return result
 
 

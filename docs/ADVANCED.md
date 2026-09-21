@@ -66,9 +66,25 @@ Files over 8 MiB use negotiated chunking. The initial send/fetch returns a trans
 
 ## Update an existing installation
 
-Finish or cancel active Bridge tasks, stop its transports, and stop Bridge before replacing its installed files. The installer preserves private configuration and state. Install the same release on both computers, run `setup` to check each local runtime, and restart. Use `preflight` before sending more work.
+Finish or cancel active Bridge tasks. On Windows, disable future startup, then stop the affected transports and Bridge before replacing installed files. The installer preserves private configuration and state. Install the same release on both computers, run `setup` to check each local runtime, re-enable the chosen startup components explicitly, and start them for the current login. Use `preflight` before sending more work.
 
 An MCP-only installation at the same path needs no new registration. A plugin installation needs the cachebuster/reinstall flow above and a fresh Codex conversation to load the new tools. Do not register both routes.
+
+## Windows owner-login startup
+
+`autostart-enable` is an explicit local-owner operation. Its default `--component auto` registers the daemon and currently enabled paired SSH transports. It snapshots that selection: a later peer is not silently added. Select one route with `--component transport --peer ID`, or only the daemon with `--component daemon`.
+
+Enabling registers future startup and does not start anything immediately. Use `start --interactive` and `transport-start --peer ID` when ready to run now. Tasks use the owner's interactive Windows login at limited privilege; they do not store a Windows password or run Codex as a pre-login service. This uses Windows' [scheduled-task principal modes](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtaskprincipal?view=windowsserver2025-ps).
+
+`autostart-status` distinguishes registration, enabled configuration, stop requests, and observed supervisor identity. Process observations do not establish remote readiness; use `preflight` and a completed harmless task.
+
+A deliberate `stop` or `transport-stop` remains in effect for the owner's current Windows login, including scheduler retries. An explicit start clears that stop after the previous process has stopped. The next owner login can start an enabled component again. Only Bridge-owned, identity-verified processes may be recovered or stopped.
+
+`autostart-disable` disables future login triggers while preserving running work. It is separate from stopping a component. `autostart-disable --remove` removes selected registrations only after their work and wrappers have stopped. Additional routes retain separate startup, stop markers, and scopes.
+
+When upgrading a legacy single transport, stop its old supervisor first and explicitly enable the intended named peer. An unbound legacy transport registration is not permission to start every new peer. Preserve current task/session state and existing request IDs during migration.
+
+Built-in login registration is Windows-only. On macOS/Linux, use the portable launcher and manual starts. [Tailscale network startup](TAILSCALE.md#3-keep-the-network-available-after-restart) is a separate prerequisite on each platform.
 
 ## Revocation
 
@@ -80,15 +96,27 @@ Cancel unwanted outgoing tasks before withdrawing a peer's access:
 
 This disables the local pairing, rejects new requests, and requests cancellation of that peer's local work. Revoke on both PCs to end the relationship. Already completed work cannot be undone; already delivered remote work can need separate cancellation.
 
-Revoking Bridge does not remove separately authorized SSH access.
+Revoking Bridge does not remove separately authorized SSH or Tailscale access. Disable the peer's startup with `autostart-disable --component transport --peer ID` when ending that route permanently.
 
 ## Stop and uninstall
 
-On the SSH transport owner, stop its supervisor. On both computers, stop Bridge:
+On Windows, first disable future startup on both computers:
+
+```powershell
+& $bridge autostart-disable
+```
+
+On the SSH transport owner, stop its supervisors. On both computers, stop Bridge:
 
 ```powershell
 & $bridge transport-stop
 & $bridge stop
+```
+
+After confirming the selected components and startup wrappers have stopped, remove Windows registrations:
+
+```powershell
+& $bridge autostart-disable --remove
 ```
 
 For MCP registration:
@@ -104,3 +132,5 @@ For plugin registration instead:
 ```
 
 These commands preserve project files and retained conversations. The installed source under `~/plugins/codex-bridge` and private configuration/state under `~/.codex-bridge` can then be kept or deliberately removed by their owner. Confirm the processes are stopped before removing them. Do not delete unrelated SSH configuration, keys, projects or tunnels.
+
+For transport rollback, restore only the affected route's former endpoint and prerequisites, then start once. Keep current databases, work, and deduplication records. Reverting an older live-state snapshot can discard new results. See the [Tailscale migration and rollback guide](TAILSCALE.md).

@@ -12,6 +12,16 @@ SSH private keys remain on the computer that owns them. Bridge never automatical
 
 Pairing invitations are secrets even though they are not account tokens. Keep export files in the dedicated protected exchange directory and delete exchange copies after import. Configuration, the SQLite state store, logs, and cached artifacts may contain credentials or project data. Local administrators and programs running as the owner remain within the local machine's trust boundary.
 
+The recommended Tailscale route carries ordinary OpenSSH; it does not replace SSH host verification or local key authentication. Its network access, device-sharing policy, and node-key expiry are independent of Bridge pairing. The setup assistant does not silently install network services, change firewall rules, enable Tailscale SSH, or modify other tunnels.
+
+## Startup and process ownership
+
+Windows startup is opt-in and limited to the signed-in owner. Registration selects the daemon and explicitly chosen existing peer routes; future peers are not automatically included. The scheduled tasks do not contain account passwords or request elevated Codex execution. They cannot execute Codex before the owner signs in.
+
+Start/stop controls use Bridge-owned process identity and lifecycle locks. A stale or unverifiable process record does not authorize terminating an arbitrary PID. A deliberate stop remains effective for the current owner login; disabling future startup preserves currently running work. Uninstalling requires disabling startup, stopping its components, and removing their registrations.
+
+Tailscale unattended mode and automatic OpenSSH service startup can provide the network before login. That does not grant access to a Codex account or turn Bridge into a Windows system service. An expired Tailscale login or revoked SSH key can still interrupt a route independently of Bridge startup.
+
 ## Project and tool scope
 
 Every received operation must match an enabled peer, a project selected locally for that peer, and a session belonging to that peer. Tasks, messages, artifacts, and context updates are separate allowed operation classes. A session uses the intersection of both computers' configured operations. Local project changes continue to constrain existing sessions.

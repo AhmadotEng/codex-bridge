@@ -157,7 +157,7 @@ def validate_schema_bundle(directory: str | Path, *, enable_local_actions: bool 
     common = {"cwd": workspace, "approvalPolicy": "never", "approvalsReviewer": "user",
               "sandbox": "read-only", "config": {}, "developerInstructions": "Scoped project task"}
     samples = {
-        "initialize": {"clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.2.0"}, "capabilities": {"experimentalApi": enable_local_actions}},
+        "initialize": {"clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.3.0"}, "capabilities": {"experimentalApi": enable_local_actions}},
         "thread/start": {**common, "ephemeral": False},
         "thread/resume": {**common, "threadId": "bridge-thread", "excludeTurns": True},
         "thread/name/set": {"threadId": "bridge-thread", "name": "Bridge: Example"},
