@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 MAX_FILE = 8 * 1024 * 1024
 MAX_HTTP = 12 * 1024 * 1024
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted', 'uncertain'}
@@ -110,6 +110,8 @@ class Bridge:
         self.adapter = adapter
         from .local_actions import LocalActions
         self.local_actions = LocalActions(self)
+        from .artifacts import ArtifactTransfers
+        self.artifact_transfers = ArtifactTransfers(self)
         self.running = {}
         self.locks = {}
         self.delivery_lock = asyncio.Lock()
@@ -219,6 +221,8 @@ class Bridge:
             allowed = {'peer.status', 'peer.session_offer', 'peer.session_get', 'peer.context_update',
                        'peer.task_accept','peer.task_status','peer.task_cancel','peer.message_accept',
                        'peer.artifact_offer','peer.artifact_get','peer.context_sync'}
+            from .artifacts import PEER_METHODS
+            allowed.update(PEER_METHODS)
             if method not in allowed:
                 raise BridgeError('scope_denied', 'Operation is unavailable through the peer interface')
             return await self.incoming(method, p, actor)
@@ -231,15 +235,17 @@ class Bridge:
 
     async def op_peer_status(self, p):
         ids = [p['peer_id']] if p.get('peer_id') else list(self.config().get('peers', {}))
-        peers = []
-        for peer_id in ids:
-            try:
-                status = await self.remote(peer_id, 'peer.status', {})
-                if status['peer_id'] != peer_id:
-                    raise BridgeError('peer_mismatch','The endpoint belongs to a different paired computer')
-                peers.append({'peer_id':peer_id,'available':True,**status})
-            except BridgeError as exc:
-                peers.append({'peer_id':peer_id,'available':False,'error':exc.as_dict()})
+        slots = asyncio.Semaphore(8)
+        async def inspect(peer_id):
+            async with slots:
+                try:
+                    status = await self.remote(peer_id, 'peer.status', {})
+                    if status['peer_id'] != peer_id:
+                        raise BridgeError('peer_mismatch','The endpoint belongs to a different paired computer')
+                    return {'peer_id':peer_id,'available':True,**status}
+                except BridgeError as exc:
+                    return {'peer_id':peer_id,'available':False,'error':exc.as_dict()}
+        peers = await asyncio.gather(*(inspect(peer_id) for peer_id in ids))
         return {'peer_id':self.node_id, 'version':VERSION,'peers':peers}
 
     async def op_session_create(self, p):
@@ -277,6 +283,60 @@ class Bridge:
 
     async def op_session_list(self, p):
         return {'sessions':[self.public_session(s) for s in self.store.all('sessions')]}
+
+    def local_chat(self, session):
+        """A local-only view: no prompts, logs, credentials, or filesystem paths."""
+        tasks = [t for t in self.store.all('incoming') if t['session_id'] == session['session_id']]
+        active = [t for t in tasks if t['status'] in ('starting', 'running', 'cancel_requested')]
+        pending = [t for t in tasks if t['status'] == 'queued']
+        task = (active or pending or sorted(tasks, key=lambda t: t['updated_at']))[-1] if tasks else {}
+        status = task.get('status')
+        result = task.get('result') or {}
+        error = task.get('error') or result.get('error') or {}
+        error_code = error.get('code') if isinstance(error, dict) else None
+        if not isinstance(error_code, str) or not re.fullmatch('[a-z_]{1,64}', error_code):
+            error_code = None
+        thread_id = session.get('conversation_ids', {}).get(self.node_id)
+        if status in ('starting', 'running', 'cancel_requested'):
+            ownership = 'working'
+        elif status == 'queued':
+            ownership = 'queued'
+        elif error_code in ('conversation_in_use', 'thread_busy'):
+            ownership = 'waiting_for_desktop_release'
+        elif status in ('failed', 'uncertain', 'interrupted'):
+            ownership = 'failed'
+        elif thread_id and result.get('conversation_release') == 'owned-app-server-closed-after-turn':
+            ownership = 'released_to_desktop'
+        elif thread_id:
+            ownership = 'release_unconfirmed'
+        else:
+            ownership = 'not_started'
+        valid_thread = isinstance(thread_id, str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', thread_id)
+        return {'session_id': session['session_id'], 'project_id': session['project_id'],
+                'peer_id': session['peer_id'], 'local_peer_id': self.node_id,
+                'name': session['name'], 'conversation_id': thread_id if valid_thread else None,
+                'chat_url': 'codex://threads/' + thread_id if valid_thread else None,
+                'ownership': ownership, 'can_open': bool(valid_thread and ownership == 'released_to_desktop'),
+                'request_id': task.get('request_id'), 'task_status': status, 'error_code': error_code,
+                'observed_at': task.get('updated_at', session.get('updated_at')),
+                'title_status': session.get('local_title_status', 'not_set'),
+                'note': 'Ownership reflects the last Bridge observation. Open this link only on this computer.'}
+
+    async def op_session_chat(self, p):
+        # Revocation must not prevent the local owner inspecting retained chat IDs.
+        session = self.store.get('sessions', identifier(p['session_id'], 'session_id'))
+        if session is None:
+            raise BridgeError('session_not_found', 'No local collaboration session with this ID')
+        return self.local_chat(session)
+
+    async def op_bridge_status(self, p):
+        peers = await self.op_peer_status({})
+        return {'peer_id': self.node_id, 'version': VERSION, 'timestamp': now(),
+                'active_requests': len(self.running),
+                'peers': [{'peer_id': peer['peer_id'], 'available': peer['available']}
+                          for peer in peers['peers']],
+                'sessions': [self.local_chat(s) for s in self.store.all('sessions')],
+                'redacted': True}
 
     async def op_session_get(self, p):
         session = self.session(p['session_id'])
@@ -514,10 +574,14 @@ class Bridge:
             if previous['session_id']!=session['session_id'] or previous['sha256']!=hashlib.sha256(data).hexdigest():
                 raise BridgeError('duplicate_conflict','Artifact ID already refers to different bytes or another session')
             return previous
-        blob = self.state_dir / 'artifacts' / artifact_id
+        self.artifact_transfers.archive_capacity(artifact_id, len(data))
+        self.artifact_transfers.claim(session, artifact_id, len(data), hashlib.sha256(data).hexdigest())
+        blob = safe_path(self.state_dir / 'artifacts', artifact_id)
         if not blob.exists():
             with blob.open('xb') as handle:
                 handle.write(data)
+        elif not blob.is_file() or blob.stat().st_size != len(data) or blob.read_bytes() != data:
+            raise BridgeError('invalid_artifact', 'An existing artifact blob does not match its claimed bytes; select a new request ID')
         record = {'artifact_id':artifact_id,'session_id':session['session_id'],'sha256':hashlib.sha256(data).hexdigest(),
                   'size':len(data),'path':path,'created_at':now()}
         self.store.put('artifacts',artifact_id,record)
@@ -528,8 +592,13 @@ class Bridge:
         previous, fingerprint = self.mutation(p['request_id'],'artifact_out',p)
         if previous:
             return previous['result']
+        project = self.project(session['project_id'], session['peer_id'])
+        source = safe_path(project['export_root'], p['path'])
+        if self.store.get('artifact_requests', p['request_id']) or (source.is_file() and source.stat().st_size > MAX_FILE):
+            return await self.artifact_transfers.start(p, 'send')
         data = self.file_payload(session,p['path'])
         artifact_id = 'artifact-' + hashlib.sha256((self.node_id+'|'+p['request_id']).encode()).hexdigest()[:32]
+        self.archive_artifact(session,artifact_id,data,p['path'])
         result = await self.remote(session['peer_id'],'peer.artifact_offer',{
             'session_id':session['session_id'],'request_id':p['request_id'],'artifact_id':artifact_id,
             'destination':p['destination'],'sha256':hashlib.sha256(data).hexdigest(),'data':base64.b64encode(data).decode()})
@@ -542,12 +611,29 @@ class Bridge:
         previous, fingerprint = self.mutation(p['request_id'],'artifact_fetch',p)
         if previous:
             return previous['result']
+        if self.store.get('artifact_requests', p['request_id']):
+            return await self.artifact_transfers.start(p, 'fetch')
+        status = await self.remote(session['peer_id'], 'peer.status', {})
+        if 'artifacts_chunked_v1' in status.get('capabilities', []):
+            await self.artifact_transfers.negotiate(session['peer_id'])
+            manifest = await self.remote(session['peer_id'], 'peer.artifact_manifest', {
+                'session_id': p['session_id'], 'artifact_id': p['artifact_id']})
+            if manifest['size'] > MAX_FILE:
+                return await self.artifact_transfers.start(p, 'fetch')
         result = await self.remote(session['peer_id'],'peer.artifact_get',{'session_id':p['session_id'],'artifact_id':p['artifact_id']})
         data = self.decode_file(result)
+        self.artifact_transfers.archive_capacity(p['artifact_id'], len(data))
+        self.artifact_transfers.claim(session, p['artifact_id'], len(data), hashlib.sha256(data).hexdigest())
         path = self.receive_file(session,p['destination'],data)
         artifact = {**self.archive_artifact(session,p['artifact_id'],data,path),'path':path}
         self.store.put('mutations',p['request_id'],{'digest':fingerprint,'result':artifact})
         return artifact
+
+    async def op_artifact_transfer_status(self, p):
+        return await self.artifact_transfers.status(p)
+
+    async def op_artifact_transfer_cancel(self, p):
+        return await self.artifact_transfers.cancel(p)
 
     def decode_file(self, p):
         try:
@@ -559,10 +645,14 @@ class Bridge:
         return data
 
     async def incoming(self, method, p, actor):
+        from .artifacts import CAPABILITY, PEER_METHODS
+        if method in PEER_METHODS:
+            return await self.artifact_transfers.incoming(method, p, actor)
         if method=='peer.status':
             return {'peer_id':self.node_id,'version':VERSION,'protocol':1,'available':True,
                 'codex':await self.adapter.capabilities(),
-                'capabilities':['sessions','tasks','retained_context','messages','artifacts_sha256','cancel','durable_dedup'],
+                'capabilities':['sessions','tasks','retained_context','messages','artifacts_sha256','cancel','durable_dedup',CAPABILITY],
+                'artifact_transfer':self.artifact_transfers.capabilities(),
                 'projects':[{'project_id':pid,'name':proj.get('name',pid),'allowed_ops':proj['allowed_ops']}
                     for pid,proj in self.config().get('projects',{}).items() if actor in proj.get('allowed_peers',[])]}
         if method=='peer.session_offer':
@@ -631,6 +721,8 @@ class Bridge:
             data=self.decode_file(p)
             if old and old['sha256']!=hashlib.sha256(data).hexdigest():
                 raise BridgeError('duplicate_conflict','Artifact ID already refers to different bytes')
+            self.artifact_transfers.archive_capacity(artifact_id, len(data))
+            self.artifact_transfers.claim(session, artifact_id, len(data), hashlib.sha256(data).hexdigest())
             path=self.receive_file(session,p['destination'],data)
             result=self.archive_artifact(session,artifact_id,data,path)
             self.store.put('mutations',p['request_id'],{'digest':fingerprint,'result':result})
@@ -639,6 +731,8 @@ class Bridge:
             artifact=self.store.get('artifacts',identifier(p['artifact_id'],'artifact_id'))
             if not artifact or artifact['session_id']!=session['session_id']:
                 raise BridgeError('artifact_not_found','Artifact does not belong to this session')
+            if artifact['size'] > MAX_FILE:
+                raise BridgeError('unsupported_transfer', 'Use chunked artifact protocol for files larger than 8 MiB')
             data=(self.state_dir/'artifacts'/p['artifact_id']).read_bytes()
             return {**artifact,'data':base64.b64encode(data).decode()}
         raise BridgeError('method_not_found','Unknown peer operation')
@@ -697,6 +791,15 @@ class Bridge:
                     current_session['conversation_ids'][self.node_id]=thread_id
                     current_session['local_action_registry_digest']=action_digest
                     self.save_session(current_session)
+                    if not session['conversation_ids'].get(self.node_id) and hasattr(self.adapter, 'set_thread_name'):
+                        title = 'Codex Bridge - ' + ''.join(c for c in session['name'] if c.isprintable())[:160]
+                        try:
+                            await self.adapter.set_thread_name(thread_id, title)
+                            current_session['local_title_status'] = 'set'
+                        except Exception:
+                            # Cosmetic metadata failure must not replay or abort the task.
+                            current_session['local_title_status'] = 'unavailable'
+                        self.save_session(current_session)
                     if cancelled:
                         await self.adapter.cancel(thread_id,turn_id)
                 async def event(value):
@@ -747,6 +850,7 @@ class Bridge:
         temporary=self.config_path.with_suffix('.json.tmp')
         temporary.write_text(json.dumps(cfg,indent=2),encoding='utf-8')
         os.replace(temporary,self.config_path)
+        await self.artifact_transfers.revoke(peer_id)
         cancelled=[]
         for task in self.store.all('incoming'):
             if task['peer_id']==peer_id and task['status'] not in TERMINAL:
@@ -770,6 +874,7 @@ class Bridge:
 
     async def maintenance(self):
         while not self.stop_event.is_set():
+            self.artifact_transfers.cleanup()
             for task in self.store.all('incoming'):
                 if task['status']=='queued': self.schedule(task)
                 elif task['status'] in ('running','starting','cancel_requested'):
@@ -841,5 +946,6 @@ class Bridge:
                     try: await self.cancel_local(self.store.get('sessions',task['session_id']),task['request_id'])
                     except Exception: pass
             await self.adapter.close()
+            await self.artifact_transfers.close()
             await asyncio.gather(*list(self.running.values()),return_exceptions=True)
             self.store.db.close()

@@ -365,13 +365,38 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description='Codex Bridge local setup and administration')
     parser.add_argument('--config',type=Path,default=config_path())
     sub=parser.add_subparsers(dest='command',required=True)
+    setup=sub.add_parser('setup',help='Detect the local runtime and preserve or create this computer configuration')
+    setup.add_argument('--peer-id'); setup.add_argument('--codex'); setup.add_argument('--port',type=int)
+    setup.add_argument('--batch',action='store_true'); setup.add_argument('--register-mcp',action='store_true')
+    setup.add_argument('--guided',action='store_true',help='Continue with pairing and project prompts after local setup')
+    pair=sub.add_parser('pair-setup',help='Guided private invitation exchange; credential contents are never printed')
+    pair.add_argument('--peer-id'); pair.add_argument('--url'); pair.add_argument('--export-file',type=Path)
+    pair.add_argument('--import-file',type=Path); pair.add_argument('--consume-import',action='store_true'); pair.add_argument('--batch',action='store_true')
+    select=sub.add_parser('project-select',help='Select or update a workspace while preserving unrelated settings and local actions')
+    select.add_argument('--id'); select.add_argument('--name'); select.add_argument('--workspace',type=Path)
+    select.add_argument('--peer-id'); select.add_argument('--export-root',type=Path); select.add_argument('--import-root',type=Path)
+    select.add_argument('--policy',choices=['read-only','workspace-write']); select.add_argument('--operations'); select.add_argument('--peer-project-id')
+    select.add_argument('--batch',action='store_true')
+    route=sub.add_parser('transport-config',help='Select an existing SSH route without copying keys or changing SSH/firewall configuration')
+    route.add_argument('--peer-id'); route.add_argument('--batch',action='store_true')
+    for key in ('ssh-host','username','identity-file','known-hosts-file','host-key-alias','ssh-exe'):
+        route.add_argument('--'+key)
+    for key in ('ssh-port','local-peer-port','remote-bridge-port','remote-peer-port'):
+        route.add_argument('--'+key,type=int)
+    preflight=sub.add_parser('preflight',help='Safe read-only runtime, sign-in, SSH, pairing, and scope checks')
+    preflight.add_argument('--peer-id'); preflight.add_argument('--project-id')
+    chat=sub.add_parser('show-chat',help='Find or open this computer local project conversation')
+    chat.add_argument('--session-id',required=True); chat.add_argument('--open',action='store_true')
     init=sub.add_parser('init'); init.add_argument('--peer-id',required=True); init.add_argument('--codex',required=True); init.add_argument('--port',type=int,default=47321)
     start=sub.add_parser('start')
     launch_mode=start.add_mutually_exclusive_group()
     launch_mode.add_argument('--interactive',action='store_true',help='Persist Windows signed-in desktop launch mode; no passwords or elevation')
     launch_mode.add_argument('--background',action='store_true',help='Persist normal detached process launch mode')
-    for name in ('serve','stop','status','diagnostics','transport-start','transport-stop','transport-status','transport-run'):
+    for name in ('serve','stop','status','diagnostics'):
         sub.add_parser(name)
+    for name in ('transport-start','transport-stop','transport-status','transport-run'):
+        transport_parser=sub.add_parser(name)
+        transport_parser.add_argument('--peer',required=(name=='transport-run'),help='Select one configured peer; omit to operate on all configured peers')
     export=sub.add_parser('pair-export'); export.add_argument('--peer-id',required=True); export.add_argument('--file',type=Path,required=True); export.add_argument('--url',required=True)
     imp=sub.add_parser('pair-import'); imp.add_argument('--file',type=Path,required=True); imp.add_argument('--url',required=True)
     revoke=sub.add_parser('revoke'); revoke.add_argument('--peer-id',required=True)
@@ -381,7 +406,32 @@ def main(argv=None):
     args=parser.parse_args(argv)
     path=args.config.expanduser().resolve()
     try:
-        if args.command=='init':
+        if args.command in ('setup','pair-setup','project-select','transport-config','preflight','show-chat'):
+            from . import onboarding
+            if args.command=='setup':
+                result=onboarding.setup(path,peer_id=args.peer_id,codex=args.codex,port=args.port,
+                    batch=args.batch,register=args.register_mcp)
+                if args.guided and not args.batch:
+                    result=onboarding.continue_setup(path,result)
+            elif args.command=='pair-setup':
+                result=onboarding.pair_setup(path,peer_id=args.peer_id,url=args.url,
+                    export_file=args.export_file,import_file=args.import_file,
+                    consume_import=args.consume_import,batch=args.batch)
+            elif args.command=='project-select':
+                result=onboarding.project_select(path,project_id=args.id,name=args.name,
+                    workspace=args.workspace,peer_id=args.peer_id,export_root=args.export_root,
+                    import_root=args.import_root,policy=args.policy,operations=args.operations,
+                    peer_project_id=args.peer_project_id,batch=args.batch)
+            elif args.command=='transport-config':
+                keys=('ssh_host','username','identity_file','known_hosts_file','host_key_alias','ssh_exe',
+                    'ssh_port','local_peer_port','remote_bridge_port','remote_peer_port')
+                result=onboarding.transport_config(path,peer_id=args.peer_id,batch=args.batch,
+                    settings={key:getattr(args,key) for key in keys if getattr(args,key) is not None})
+            elif args.command=='preflight':
+                result=onboarding.preflight(path,peer_id=args.peer_id,project_id=args.project_id)
+            else:
+                result=onboarding.show_chat(path,args.session_id,open_chat=args.open)
+        elif args.command=='init':
             if path.exists(): raise BridgeError('already_initialized','Configuration exists; it was preserved')
             if not 1024<=args.port<=65535: raise BridgeError('configuration','Select a port between 1024 and 65535')
             if not Path(args.codex).is_file(): raise BridgeError('configuration','The selected Codex executable does not exist')
@@ -437,7 +487,12 @@ def main(argv=None):
                 result={'ok':True,'already_unreachable':True}
             stopped=wait_for_exit(Path(cfg['state_dir'])/'serve.pid.json',seconds=15)
             result.update(stopped=stopped,stopping=not stopped)
-        elif args.command=='status': result=call(path,'peer_status')
+        elif args.command=='status':
+            result=call(path,'bridge_status')
+            if isinstance(result,dict) and result.get('ok') is False:
+                result={'ok':False,'error':{'code':'status_unavailable',
+                    'message':'The local Bridge could not provide status. Run preflight to check this configuration.',
+                    'retryable':False}}
         elif args.command=='diagnostics': result=call(path,'diagnostics')
         elif args.command=='revoke':
             try: result=call(path,'peer_revoke',{'peer_id':args.peer_id})
@@ -446,40 +501,25 @@ def main(argv=None):
                 result={'revoked':True,'peer_id':args.peer_id,'daemon_was_offline':True}
         elif args.command=='tool-approvals':
             result=asyncio.run(configure_tool_approvals(path,args.marketplace,args.mode))
-        elif args.command=='transport-run':
-            cfg=read_config(path)
-            state=Path(cfg['state_dir'])
-            with process_lock(state/'transport.lock'):
-                save(state/'transport-run.pid.json',{'pid':os.getpid(),'created_at':now(),'config':str(path)})
-                supervise_transport(path)
-            return 0
-        elif args.command=='transport-start':
-            cfg=read_config(path); transport_args(cfg)
-            if not cfg['ssh_transport'].get('enabled',False):
-                raise BridgeError('configuration','Enable the configured SSH transport before starting its supervisor')
-            pid_file=Path(cfg['state_dir'])/'transport-run.pid.json'
-            stop=Path(cfg['state_dir'])/'transport.stop'
-            if stop.exists() and not wait_for_exit(pid_file,seconds=10):
-                raise BridgeError('still_stopping','The previous transport supervisor is still stopping; retry after it exits')
-            if pid_file.exists() and process_alive(read(pid_file)['pid']):
-                print(json.dumps({'already_running':True,'pid':read(pid_file)['pid']})); return 0
-            # Only delete this single known marker inside the configured state directory.
-            if stop.exists(): stop.unlink()
-            proc=launch(path,'transport-run'); result={'supervisor_started':True,'pid':proc.pid,'ssh_connection_verified':False}
-        elif args.command=='transport-stop':
-            cfg=read_config(path)
-            state=Path(cfg['state_dir']); state.mkdir(parents=True,exist_ok=True)
-            (state/'transport.stop').touch()
-            stopped=wait_for_exit(state/'transport-run.pid.json',seconds=10)
-            result={'stopped':stopped,'stopping':not stopped}
-        elif args.command=='transport-status': result=transport_status(path)
+        elif args.command in ('transport-run','transport-start','transport-stop','transport-status'):
+            from . import transport
+            if args.command=='transport-run':
+                transport.supervise_transport(path,args.peer)
+                return 0
+            elif args.command=='transport-start': result=transport.start_transports(path,args.peer)
+            elif args.command=='transport-stop': result=transport.stop_transports(path,args.peer)
+            else: result=transport.transport_status(path,args.peer)
         elif args.command=='call':
             params=read(args.json_file) if args.json_file else json.loads(args.json)
             result=call(path,args.method,params)
         print(json.dumps(result,indent=2,ensure_ascii=False))
         return 1 if isinstance(result,dict) and result.get('ok') is False else 0
     except Exception as exc:
-        error=exc.as_dict() if isinstance(exc,BridgeError) else {'code':'local_error','message':str(exc),'retryable':False}
+        safe_commands={'setup','pair-setup','project-select','transport-config','preflight','show-chat','status','transport-status'}
+        if args.command in safe_commands and not isinstance(exc,BridgeError):
+            error={'code':'local_check_failed','message':'The local operation could not complete. Verify the selected files and configuration, then run setup or preflight.', 'retryable':False}
+        else:
+            error=exc.as_dict() if isinstance(exc,BridgeError) else {'code':'local_error','message':str(exc),'retryable':False}
         print(json.dumps({'ok':False,'error':error},ensure_ascii=False),file=sys.stderr)
         return 1
 

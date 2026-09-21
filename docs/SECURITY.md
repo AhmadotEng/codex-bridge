@@ -8,7 +8,7 @@ The daemon listens on `127.0.0.1` only. Its MCP client uses a local bearer crede
 
 An SSH connection supplies encryption and peer host authentication. The bridge supervisor uses a pinned known-hosts file, `StrictHostKeyChecking=yes`, an explicitly selected local identity, batch mode, and loopback `-L` and `-R` forwards. It does not request a shell. Existing reverse-tunnel relays remain transport components; a reverse forwarding permission is not permission to run commands on the relay host.
 
-SSH private keys remain on the computer that owns them. Codex account tokens, browser sessions, and private keys are not included in bridge invitations, project artifacts, or plugin bundles. The Codex App Server authenticates through the local user's existing Codex installation. The bridge does not implement account login, copy `auth.json`, or import another person's account.
+SSH private keys remain on the computer that owns them. Bridge never automatically collects Codex account tokens, browser sessions, or private keys, and they are absent from invitations and published plugin bundles. Selected artifact contents are not automatically screened for secrets; owners must keep credentials out of transfer folders. The Codex App Server authenticates through the local user's existing Codex installation. The bridge does not implement account login, copy `auth.json`, or import another person's account.
 
 Pairing invitations are secrets even though they are not account tokens. Keep export files in the dedicated protected exchange directory and delete exchange copies after import. Configuration, the SQLite state store, logs, and cached artifacts may contain credentials or project data. Local administrators and programs running as the owner remain within the local machine's trust boundary.
 
@@ -16,13 +16,13 @@ Pairing invitations are secrets even though they are not account tokens. Keep ex
 
 Every received operation must match an enabled peer, a project selected locally for that peer, and a session belonging to that peer. Tasks, messages, artifacts, and context updates are separate allowed operation classes. A session uses the intersection of both computers' configured operations. Local project changes continue to constrain existing sessions.
 
-Peer tools cannot add trusted computers, select arbitrary workspace roots, edit local bridge configuration, install plugins, or call an unrestricted shell operation. Messages and artifacts are data, not instructions that can expand local authorization. The twelve MCP tools expose the defined collaboration operations; local administration remains in the CLI.
+Peer tools cannot add trusted computers, select arbitrary workspace roots, edit local bridge configuration, install plugins, or call an unrestricted shell operation. Messages and artifacts are data, not instructions that can expand local authorization. The MCP tools expose defined collaboration operations; local administration remains in the CLI. The safe status and local-chat views are unavailable through peer credentials.
 
 Different sessions retain different context and conversation IDs. Sessions serialize their task turns to avoid concurrent modification of the same conversation. Project/session state separation does not create separate Windows users or an operating-system container. Selecting the same physical workspace for two projects can still create ordinary file-level interference; choose separate directories when isolation is needed.
 
 ## Codex execution policy
 
-Workers run the locally installed Codex App Server with the local model default. The adapter only accepts the schema-validated versions listed in its capabilities. It uses retained `thread/start` or `thread/resume` conversations owned by the bridge and never searches arbitrary personal conversations for a match.
+Workers run the locally installed Codex App Server with the local model default. The adapter checks the selected executable's generated schema against the requests, policies, responses, and notifications it needs; incompatible contracts are refused. Schema acceptance is separate from behavioral verification. It uses retained `thread/start` or `thread/resume` conversations owned by the bridge and never searches arbitrary personal conversations for a match.
 
 The default task policy is `read-only`. `workspace-write` must be chosen in local project configuration and restricts the writable roots requested from Codex to the selected workspace. Network access is disabled for worker execution. Approval requests and unsupported interactive prompts are denied and reported; they are not silently approved or redirected to another account.
 
@@ -32,9 +32,9 @@ Personal MCP servers, plugins, apps, and hooks are disabled for worker turns by 
 
 ## Files and results
 
-Each file transfer is one explicitly selected file, at most 8 MiB. Export and import roots must be inside the selected workspace. The implementation rejects absolute paths, parent traversal, root escapes, symlinks, and Windows reparse-point paths. Artifact lookup is scoped to its originating collaboration session.
+Each file transfer is one explicitly selected file. Files up to 8 MiB use direct transfer; negotiated chunked transfers support larger files with a default 256 MiB file ceiling, bounded storage, at most eight active transfers, and expiry of incomplete staging data. Export and import roots must be inside the selected workspace. The implementation rejects absolute paths, parent traversal, root escapes, symlinks, and Windows reparse-point paths. Artifact and chunk lookup are scoped to their originating peer and collaboration session.
 
-The receiver checks byte length and SHA-256 and archives the artifact reference. A different existing destination is not overwritten. Identical transfers can be retried using the same operation ID. This protects the bridge's transfer boundary; it is separate from the read/write abilities of an explicitly authorized Codex task.
+The receiver checks chunk and final byte lengths and SHA-256 and archives the artifact reference. A different existing destination is not overwritten. Identical transfers can be retried using the same operation ID. Large transfers stage data privately before publishing the completed file. Archive/staging quotas do not include completed files retained in the owner's selected import folders. This protects the bridge's transfer boundary; it is separate from the read/write abilities of an explicitly authorized Codex task.
 
 Task prompts, progress, results, messages, and transferred logs can contain project information. Inspect them before exporting beyond the selected collaboration. Do not place account credentials or private keys in an export root. Peer text should be treated as untrusted content when included in later Codex prompts.
 

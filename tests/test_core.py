@@ -63,7 +63,7 @@ class FakeAdapter:
 class CoreIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='codex-bridge-test-')
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.bridges = {}
         self.adapters = {}
         self.servers = {}

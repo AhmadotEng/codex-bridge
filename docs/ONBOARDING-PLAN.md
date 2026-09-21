@@ -1,65 +1,55 @@
-# Plan: make Bridge usable by two new people
+# Onboarding plan: implementation status
 
 ## Target experience
 
-Two people install the same connector, sign into Codex separately, pair their computers, and choose project folders. They can exchange tasks and results without copying prompts between chats. A new project requires workspace selection and one new session, not reinstallation.
+Two people install the same connector, sign into Codex separately, pair their computers, and choose project folders. They exchange tasks and results without manually relaying every prompt. Another project needs workspace selection and a new session, not another installation.
 
-Account authentication, computer pairing, and project permissions are three separate things. Sharing a Codex account is unnecessary and does not create a shared project conversation.
+Account authentication, computer pairing, and project permissions are separate. Sharing a Codex account is unnecessary.
 
 ## Files on each system
 
-| Item | Same or different? | Who creates it? |
+| Item | Same or different? | Created by |
 | --- | --- | --- |
-| Bridge source / plugin bundle | Same version on both PCs | Download from this repository |
-| Installed `.mcp.json` | Different executable/config paths | `install.ps1` |
-| `~/.codex-bridge/config.json` | Different ID, runtime path, credentials, and scopes | `init`, pairing, local project setup |
-| `~/.codex-bridge/state/` | Different request history and local state | Bridge |
-| Pairing invitations | One temporary secret from each PC | `pair-export` |
-| SSH identity and known-host files | Existing local files; private key stays with its owner | Each computer's SSH owner |
-| Project folder and transfer folders | Each person selects their own paths | `project-add` |
-| Project conversation IDs | One local ID per participating computer | First received task on that computer |
+| Bridge source / plugin bundle | Same version | This repository |
+| Installed `.mcp.json` | Different executable/config paths | Local installer |
+| `~/.codex-bridge/config.json` | Different identity, credentials, runtime, scopes | Setup assistant |
+| `~/.codex-bridge/state/` | Different requests, progress, and local state | Bridge |
+| Private invitations | One Bridge credential from each computer | `pair-setup` |
+| SSH identity and known-host files | Existing local files; private key stays local | Each SSH owner |
+| Project and transfer folders | Locally selected | `project-select` |
+| Conversation IDs | One local conversation per participating computer/session | First received task |
 
-The example files for A and B are explanatory templates, not live configurations. Real credentials are generated locally and never committed.
+## Phase 1 — published
 
-## Phase 1: publish an understandable preview
+The repository includes the account explanation, A/B examples, optional plugin packaging, a source-allowlist installer, and tested scoped collaboration primitives. Completed worker processes release their conversation writers.
 
-Included in this repository:
+## Phase 2 — implemented
 
-1. A short README with the account answer and a six-step setup overview.
-2. Exact, separately labeled A/B commands in a setup guide.
-3. MCP registration that does not depend on internal scaffolding tools; optional plugin packaging remains available.
-4. Secret-free examples for the SSH transport owner and the receiving computer.
-5. An installer that copies an explicit source allowlist, excluding Git metadata and private runtime files.
-6. A worker lifecycle that releases a finished conversation and refuses to take over a desktop-owned conversation.
-7. Tests and clear limits for supported versions, selected file transfer, cancellation, and revocation.
+| Planned feature | Implementation |
+| --- | --- |
+| Detect tools and check Codex compatibility | `setup.ps1` / `setup`; generated App Server schema validation |
+| Guided private pairing | `pair-setup`; resumable invitation export/import; no credential contents printed |
+| Identify connection failures | `preflight` separates runtime, sign-in, local daemon, SSH, forwarding, pairing, and project scope |
+| Choose/update project folders | `project-select` preserves other projects, peers, and fixed local actions |
+| Find a meaningful local chat | `show-chat` / `session_chat`; automatic project titles on new Bridge conversations |
+| Show writer ownership | Working, released, desktop-owned conflict, failure, and unconfirmed states |
+| Safe everyday status | `status` / `bridge_status` omit prompts, tokens, logs, and workspace paths |
 
-This remains a compatibility-limited Windows preview with manual pairing and transport configuration.
+## Phase 3 — implemented, with verification limits
 
-## Phase 2: simplify the remaining manual setup
+| Planned feature | Implementation |
+| --- | --- |
+| Additional Codex versions | Structural contract checks against the installed binary, with negative tests for incompatible schemas |
+| macOS/Linux launchers | Explicit-allowlist Python installer and POSIX wrappers; cross-platform CI |
+| Files above 8 MiB | Asynchronous verified chunks, durable progress, bounded quotas, retry/resume, cancellation and expiry |
+| Additional peers | Named SSH transports with separate lifecycle/state, pairing credentials, and project scopes |
 
-Planned; not implemented:
+Passing a generated-schema check does not prove every behavior of a new Codex version. Launcher/unit CI does not prove desktop integration or authenticated model execution on every operating system. See [verification evidence](TESTING.md).
 
-- A local setup assistant that detects Python/Codex, checks the installed App Server schema, and asks only for missing values.
-- Guided invitation export/import with clear computer names and private exchange instructions.
-- A connection test that identifies whether the failure is SSH, forwarding, pairing, runtime authentication, or project scope.
-- A project picker that writes each PC's paths without overwriting unrelated configuration.
-- A “show local project chat” command and meaningful automatic chat titles.
-- Visible ownership states: working, released to desktop, waiting for desktop release, failed.
-- A safe status view that does not expose tokens, personal file paths, or logs by default.
+## Acceptance for two new users
 
-Each feature must be tested using fresh configuration directories. It must not require the original developers' accounts, machine names, game files, or credentials.
+Use separate local accounts and empty workspaces. Verify both directions, retained-context follow-up, file integrity, and a second isolated project. Retry a disconnected request with the same ID and confirm it does not execute twice. Cancel active work, revoke the disposable pairing, and confirm later requests fail.
 
-## Phase 3: broaden compatibility
+Open a finished worker chat without a lingering Bridge writer. While the desktop owns it, confirm Bridge reports `conversation_in_use` without taking it over. Treat completed results and file hashes as evidence; a queued request or connected tunnel alone is insufficient.
 
-Planned; not implemented:
-
-- Schema checks and test coverage for additional Codex versions.
-- Tested macOS/Linux launchers.
-- Optional verified chunking for files above 8 MiB.
-- Easier additional peers while keeping separate trust and project scopes.
-
-## Acceptance test for two new users
-
-Use separate Codex accounts and an empty sample workspace on each PC. Verify both directions, a follow-up with retained context, an intact small file, and a second isolated project. Disconnect/reconnect using the same request ID and confirm no duplicate execution. Cancel an active request, revoke pairing, and verify later requests are rejected.
-
-Open a finished worker conversation in the desktop without a lingering Bridge lock. While the desktop owns it, verify Bridge reports `conversation_in_use` without dispatching another turn. Do not treat a queued request, connected tunnel, or completed assistant response alone as proof of the requested result.
+Automated fresh-directory tests cover the setup and protocol boundaries. Real local Codex tests check title persistence, retained context, and writer release. Final acceptance by two new human users with separate accounts remains a distinct deployment check.

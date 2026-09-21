@@ -1,8 +1,6 @@
 # Verification
 
-## Automated tests
-
-The public release passed all **78 tests** on Windows with Python 3.11.
+## Isolated automated tests
 
 Run from the repository root:
 
@@ -10,23 +8,46 @@ Run from the repository root:
 python -m unittest discover -s tests -v
 ```
 
-The suite exercises authentication boundaries, workspace/transfer scope, path traversal and links, integrity hashes, version/configuration checks, MCP schemas, request deduplication, reconnect/recovery, cancellation, revocation, Windows launcher lifecycle, fixed actions, and conversation ownership.
+The suite runs without account credentials or a remote computer. It uses temporary configurations, fake private-file sentinels, real local HTTP endpoints, and protocol fixtures where model execution is unnecessary.
 
-Installer tests use temporary directories containing fake private-file sentinels. They verify that Git metadata, runtime state and untracked files do not enter the installed connector. Tests do not log into Codex or contact another computer. Windows-specific checks may be skipped on other platforms.
+Coverage includes:
 
-## Manual verification performed during development
+- Fresh setup, reruns, private invitations, independent computer credentials, and project preservation.
+- Schema compatibility, rejection of missing security fields, and sanitized diagnostics.
+- Both task directions, retained session IDs, two isolated projects, durable deduplication, cancellation, and revocation.
+- Local chat links, meaningful titles, writer release/conflicts, and safe status views.
+- Both file directions and fetch; large transfers, integrity failures, dropped replies, restarts, cancellation, expiry, quotas, and overwrite/path defenses.
+- Independent peer SSH supervisors, loopback forwarding, host verification, error classification, and legacy migration.
+- Windows and portable installer allowlists; platform-specific process and launcher tests.
 
-Two Windows computers, each using its own local Codex installation and login, exchanged model-driven tasks, replies and selected files in both directions. Follow-ups retained context; independent projects stayed separate. Disconnect/retry, cancellation and revocation were tested. SHA-256 checks confirmed selected file transfers.
+[GitHub Actions](https://github.com/AhmadotEng/codex-bridge/actions/workflows/test.yml) runs the suite on Windows, Ubuntu, and macOS with Python 3.11 and 3.13. Platform-specific tests are skipped when their platform is absent. The POSIX lifecycle test installs into a temporary folder and runs init/start/status/stop against a fake App Server; it does not use a real Codex account.
 
-Installed App Server schemas were inspected for versions **0.153.4** and **0.155.0-alpha.2.6**. A real two-client App Server test confirmed that closing the Bridge-owned process releases its writer, preserves the conversation ID/context, and permits another local client to resume. While that client owns the conversation, Bridge returns `conversation_in_use` without starting a turn. Persistent fixed-action tools also survived release and resume.
+## Real checks for the onboarding release
 
-That ownership fix is included in this source release. These tests do not claim every existing deployment was upgraded. Real-life diagnostic transcripts, conversation IDs, usernames, private paths and device logs are excluded from the public repository.
+On Windows with Python 3.11 and Codex **0.153.4**:
 
-## Still to verify
+- The selected executable's generated App Server schema passed both ordinary and experimental local-action checks.
+- The actual `setup.ps1` entry point installed into a fresh temporary directory with MCP registration deliberately skipped. It detected the local runtime and saved sign-in without exposing account information.
+- Running setup again preserved the generated configuration byte-for-byte. Existing live configuration was unchanged.
+- Two real Codex turns used the same temporary-workspace conversation. The second recalled the first turn's marker.
+- The automatic project title persisted in the stored conversation.
+- The worker process was released after each turn.
 
-- End-to-end onboarding by two new users following only the public setup guide.
-- Other Codex versions and macOS/Linux deployment.
-- Automatic large-file chunking and more than one supervisor-managed transport per configuration.
-- Guaranteed desktop notifications or automatic sidebar refresh.
+These checks used one existing local account. They are not a claim that two new people completed the public guide.
 
-Bridge tests establish collaboration behavior. They do not establish the correctness of a particular project, game, device plugin or deployment.
+## Earlier two-computer verification
+
+During development, two Windows computers using their own local Codex installations and logins exchanged model-driven tasks, replies, and selected files in both directions. Follow-ups retained context and independent projects stayed separate. Disconnect/retry, cancellation, revocation, and SHA-256 file integrity were checked.
+
+App Server schemas were inspected for **0.153.4** and **0.155.0-alpha.2.6**. A real two-client test verified writer release and resume; a desktop-owned conflict failed without dispatching another turn. Fixed-action tools survived release and resume.
+
+Those earlier checks establish the collaboration foundation. They do not imply every existing deployment has been upgraded. Diagnostic transcripts, real conversation IDs, account names, machine names, private paths, and device logs are excluded from this repository.
+
+## Remaining deployment verification
+
+- Two new users completing the public guide with separate accounts and their own SSH connection.
+- Real authenticated model turns, desktop chat behavior, and host sandbox policies on macOS/Linux.
+- Behavioral testing of additional schema-compatible Codex releases.
+- Desktop notifications and automatic sidebar refresh; neither is promised by Bridge.
+
+Bridge verification does not establish the correctness of a particular project or device deployment.

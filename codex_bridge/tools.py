@@ -33,6 +33,8 @@ def _tool(name: str, description: str, properties: dict, required: list[str], *,
 
 
 TOOLS = [
+    _tool("bridge_status", "Show safe local collaboration status and observed chat ownership without prompts, logs, tokens, or workspace paths.", {}, [], readonly=True),
+    _tool("session_chat", "Find this computer's project chat link and observed ownership state. This does not start a turn or take over a desktop-owned chat. Open the returned link on this computer only.", {"session_id": SESSION}, ["session_id"], readonly=True),
     _tool("peer_status", "Discover paired computers, current availability, and bridge capabilities. Pairing is configured locally outside these tools.", {"peer_id": _string("Optional configured peer identifier.", 128)}, [], readonly=True),
     _tool("session_create", "Create a collaboration conversation for an already configured project on a paired computer. Workspaces and scope come from each computer's local project configuration. Supply a stable session_id to retry safely.", {
         "peer_id": _string("Configured paired computer identifier.", 128),
@@ -67,13 +69,15 @@ TOOLS = [
         "request_id": REQUEST,
         "continue_conversation": {"type": "boolean", "default": False},
     }, ["session_id", "text", "kind", "request_id"]),
-    _tool("artifact_send", "Transfer one explicitly selected file from this session's local export root to its peer import root. Returns the artifact ID and integrity hash. No arbitrary filesystem access is provided.", {
+    _tool("artifact_send", "Transfer one explicitly selected file from this session's local export root to its peer import root. Small files return the artifact and hash; files over 8 MiB return durable transfer progress. Inspect artifact_transfer_status until completed. Reuse the same request ID to resume after an interruption.", {
         "session_id": SESSION, "path": RELATIVE_PATH, "destination": RELATIVE_PATH, "request_id": REQUEST,
     }, ["session_id", "path", "destination", "request_id"]),
-    _tool("artifact_fetch", "Fetch a selected, previously registered peer artifact into this session's local import root. Verify the returned integrity hash and artifact reference.", {
+    _tool("artifact_fetch", "Fetch a selected, previously registered peer artifact into this session's local import root. Files over 8 MiB return durable progress; inspect artifact_transfer_status until completed. Verify the final hash and artifact reference.", {
         "session_id": SESSION, "artifact_id": _string("Artifact ID from the session history or artifact_send result.", 128),
         "destination": RELATIVE_PATH, "request_id": REQUEST,
     }, ["session_id", "artifact_id", "destination", "request_id"]),
+    _tool("artifact_transfer_status", "Inspect a large file transfer's progress, terminal status, error, and final artifact reference. A queued transfer is not yet delivered.", {"session_id": SESSION, "request_id": REQUEST}, ["session_id", "request_id"], readonly=True),
+    _tool("artifact_transfer_cancel", "Cancel a bridge-managed large file transfer and remove its unfinished staging data. Already completed transfers and files cannot be undone.", {"session_id": SESSION, "request_id": REQUEST}, ["session_id", "request_id"], destructive=True),
 ]
 
 TOOLS_BY_NAME = {tool["name"]: tool for tool in TOOLS}

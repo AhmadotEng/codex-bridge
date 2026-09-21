@@ -18,10 +18,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .compatibility import TESTED_VERSIONS, inspect_runtime
+
 EventCallback = Callable[[dict[str, Any]], Awaitable[None]]
 StartedCallback = Callable[[str, str], Awaitable[None]]
 ActionCallback = Callable[[str, str], Awaitable[dict]]
-SUPPORTED_VERSIONS = frozenset({"0.153.4", "0.155.0-alpha.2.6"})
+SUPPORTED_VERSIONS = TESTED_VERSIONS  # Kept for callers; runtime uses schema validation.
 MAX_TEXT = 256_000
 MAX_EVENT_TEXT = 8_000
 MAX_WIRE_LINE = 4_000_000
@@ -85,6 +87,7 @@ class CodexAdapter:
         self._active: dict[str, _Run] = {}
         self._next_id = 0
         self._version: str | None = None
+        self._compatibility: dict = {}
         self._initialized: dict = {}
         self._closing = False
         self._server_request_tasks: set[asyncio.Task] = set()
@@ -128,15 +131,18 @@ class CodexAdapter:
             if self._proc is not None:
                 await self.close()
             self._closing = False
-            self._version = await self._probe_version()
-            if self._version not in SUPPORTED_VERSIONS:
-                raise AdapterError("unsupported_codex_version", f"Codex {self._version} is not schema-validated; supported: {', '.join(sorted(SUPPORTED_VERSIONS))}")
+            self._compatibility = await asyncio.to_thread(inspect_runtime, self.codex_path,
+                timeout=self.request_timeout, enable_local_actions=self.enable_local_actions)
+            self._version = self._compatibility.get("codex_version")
+            if not self._compatibility.get("ready"):
+                errors = self._compatibility.get("errors") or [{"message": "Codex App Server schema is incompatible"}]
+                raise AdapterError("unsupported_codex_schema", errors[0]["message"])
             self._proc = await self._spawn()
             self._reader = asyncio.create_task(self._read_loop())
             self._stderr = asyncio.create_task(self._drain_stderr())
             try:
                 self._initialized = await self._rpc("initialize", {
-                    "clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.1.0"},
+                    "clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.2.0"},
                     "capabilities": {"experimentalApi": self.enable_local_actions},
                 })
                 await self._send({"method": "initialized", "params": {}})
@@ -148,7 +154,8 @@ class CodexAdapter:
         await self.start()
         return {
             "adapter": "codex-app-server-stdio", "codex_version": self._version,
-            "supported_versions": sorted(SUPPORTED_VERSIONS), "ready": True,
+            "tested_versions": sorted(TESTED_VERSIONS), "ready": True,
+            "compatibility": self._compatibility,
             "context_retention": "thread/resume", "cancellation": "turn/interrupt",
             "policies": ["read-only", "workspace-write"], "network_access": False,
             "approval_behavior": "deny-and-report", "model": "local-configured-default",
@@ -484,6 +491,12 @@ class CodexAdapter:
                         await asyncio.wait_for(asyncio.gather(*list(state.action_tasks), return_exceptions=True), 5)
                 self._active.pop(state.thread_id, None)
 
+    async def set_thread_name(self, thread_id: str, name: str) -> dict:
+        """Name an already owned conversation; never load a desktop-owned one."""
+        if thread_id not in self._active:
+            raise AdapterError("thread_not_owned", "Only an active bridge conversation can be named")
+        return await self._rpc("thread/name/set", {"threadId": thread_id, "name": name})
+
     async def cancel(self, thread_id: str, turn_id: str) -> dict:
         state = self._active.get(thread_id)
         if state is None or state.turn_id != turn_id:
@@ -606,6 +619,12 @@ class TurnScopedCodexAdapter:
             for owned_thread, owner in list(self.by_thread.items()):
                 if owner is worker:
                     self.by_thread.pop(owned_thread, None)
+
+    async def set_thread_name(self, thread_id, name):
+        worker = self.by_thread.get(thread_id)
+        if worker is None:
+            raise AdapterError("thread_not_owned", "Bridge does not own this conversation")
+        return await worker.set_thread_name(thread_id, name)
 
     async def cancel(self, thread_id, turn_id):
         worker = self.by_thread.get(thread_id)

@@ -14,14 +14,22 @@ POWERSHELL = shutil.which('powershell.exe') or shutil.which('pwsh')
 RUNTIME_FILES = (
     '.codex-plugin/plugin.json',
     'codex_bridge/__init__.py',
+    'codex_bridge/artifacts.py',
     'codex_bridge/cli.py',
     'codex_bridge/codex_adapter.py',
+    'codex_bridge/compatibility.py',
     'codex_bridge/core.py',
     'codex_bridge/local_actions.py',
     'codex_bridge/mcp.py',
+    'codex_bridge/onboarding.py',
     'codex_bridge/tools.py',
+    'codex_bridge/transport.py',
     'scripts/bridge.ps1',
     'scripts/install.ps1',
+    'scripts/setup.ps1',
+    'scripts/bridge.sh',
+    'scripts/install.py',
+    'scripts/install.sh',
     'skills/collaborate/SKILL.md',
 )
 
@@ -31,7 +39,7 @@ class InstallTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='codex-bridge-install-')
         self.root = Path(self.temporary.name).resolve()
-        self.source = self.root / 'source'
+        self.source = self.root / 'source-bundle' / 'codex-bridge'
         self.target = self.root / 'installed' / 'codex-bridge'
         self.config = self.root / 'private' / 'config.json'
         self.config.parent.mkdir()
@@ -109,6 +117,59 @@ class InstallTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Required plugin file is missing', result.stderr)
         self.assertFalse(self.target.exists())
+
+    def junction(self, link, destination):
+        link.parent.mkdir(parents=True, exist_ok=True)
+        quote = lambda value: "'" + str(value).replace("'", "''") + "'"
+        script = 'New-Item -ItemType Junction -Path ' + quote(link) + ' -Value ' + quote(destination) + ' -ErrorAction Stop | Out-Null'
+        result = subprocess.run([POWERSHELL, '-NoProfile', '-NonInteractive', '-Command', script],
+                                capture_output=True, text=True, timeout=20)
+        if result.returncode:
+            self.skipTest('Directory junction creation is unavailable on this Windows runner')
+
+    def test_destination_junction_is_rejected_before_any_copy(self):
+        outside = self.root / 'unrelated-owner-data'
+        outside.mkdir()
+        sentinel = outside / 'owner.txt'
+        sentinel.write_text('preserve', encoding='utf-8')
+        self.junction(self.target, outside)
+        try:
+            result = self.install()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('linked files or directories', result.stderr)
+            self.assertEqual(list(outside.iterdir()), [sentinel])
+            self.assertEqual(sentinel.read_text(), 'preserve')
+        finally:
+            self.target.rmdir()
+
+    def test_nested_destination_junction_is_rejected_before_other_runtime_files_are_written(self):
+        outside = self.root / 'unrelated-modules'
+        outside.mkdir()
+        link = self.target / 'codex_bridge'
+        self.junction(link, outside)
+        try:
+            result = self.install()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertFalse((self.target / '.codex-plugin').exists())
+        finally:
+            link.rmdir()
+
+    def test_launcher_link_is_rejected_even_when_installing_in_place(self):
+        outside = self.root / 'unrelated-owner-launcher.json'
+        outside.write_text('preserve owner launcher', encoding='utf-8')
+        launcher = self.source / '.mcp.json'
+        try:
+            launcher.symlink_to(outside)
+        except OSError:
+            self.skipTest('File symlink creation requires privileges unavailable on this Windows runner')
+        try:
+            result = self.install(self.source)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('linked files or directories', result.stderr)
+            self.assertEqual(outside.read_text(), 'preserve owner launcher')
+        finally:
+            launcher.unlink()
 
 
 if __name__ == '__main__':

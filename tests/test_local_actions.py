@@ -38,7 +38,7 @@ class OwnerConfig:
 class LocalActionsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.owner = OwnerConfig(Path(self.temp.name))
+        self.owner = OwnerConfig(Path(self.temp.name).resolve())
         self.actions = LocalActions(self.owner)
 
     async def asyncTearDown(self):
