@@ -27,6 +27,30 @@ SUPPORTED_VERSIONS = TESTED_VERSIONS  # Kept for callers; runtime uses schema va
 MAX_TEXT = 256_000
 MAX_EVENT_TEXT = 8_000
 MAX_WIRE_LINE = 4_000_000
+MAX_EXECUTION_ITEMS = 32
+MAX_EXECUTION_TRACKED = 4096
+
+
+def _safe_item_identifier(value: Any) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value))
+
+
+def _command_completion(item: Any) -> dict | None:
+    """Allowlist completed native-command metadata; never return command data."""
+    if not isinstance(item, dict) or item.get("type") != "commandExecution":
+        return None
+    if not _safe_item_identifier(item.get("id")):
+        return None
+    status, code, duration = item.get("status"), item.get("exitCode"), item.get("durationMs")
+    if status not in ("completed", "failed", "declined"):
+        return None
+    if code is not None and (type(code) is not int or not -(2 ** 31) <= code <= 2 ** 32 - 1):
+        return None
+    if duration is not None and (type(duration) is not int or not 0 <= duration <= 2 ** 53 - 1):
+        return None
+    if status == "declined" and code is not None:
+        return None
+    return {"item_id": item["id"], "status": status, "exit_code": code, "duration_ms": duration}
 
 
 class AdapterError(RuntimeError):
@@ -48,6 +72,39 @@ class _Run:
     action_ids: frozenset[str] = frozenset()
     action_tasks: set = field(default_factory=set)
     cancelled: bool = False
+    turn_confirmed: bool = False
+    command_completions: dict[tuple[str, str], dict] = field(default_factory=dict)
+    command_tracking_limited: bool = False
+
+    def record_command(self, turn_id: Any, item: Any) -> None:
+        if not _safe_item_identifier(turn_id):
+            return
+        completion = _command_completion(item)
+        if completion is None:
+            return
+        key = (turn_id, completion["item_id"])
+        if key in self.command_completions:
+            return
+        if len(self.command_completions) >= MAX_EXECUTION_TRACKED:
+            self.command_tracking_limited = True
+            return
+        self.command_completions[key] = completion
+
+    def execution_evidence(self) -> dict:
+        # turn/started and item events may arrive before turn/start's RPC reply.
+        # Only that reply confirms which turn belongs to this request. Retain
+        # bounded early candidates, then count only its exact confirmed turn.
+        items = [item for (turn, _), item in self.command_completions.items()
+                 if self.turn_confirmed and turn == self.turn_id]
+        executed = [item for item in items if item["status"] in ("completed", "failed")
+                    and item["exit_code"] is not None]
+        successful = sum(item["status"] == "completed" and item["exit_code"] == 0 for item in executed)
+        return {"source": "app_server_item_completed", "native_command_execution": "observed" if executed else "not_observed",
+                "thread_id": self.thread_id, "turn_id": self.turn_id if self.turn_confirmed else None,
+                "command_items_total": len(items), "execution_observed_count": len(executed),
+                "successful_exit_count": successful, "unsuccessful_exit_count": len(executed) - successful,
+                "items": items[:MAX_EXECUTION_ITEMS], "omitted_items": max(0, len(items) - MAX_EXECUTION_ITEMS),
+                "tracking_limit_reached": self.command_tracking_limited}
 
     def put(self, event: dict) -> None:
         # A slow consumer cannot block the App Server response reader. Terminal
@@ -134,6 +191,8 @@ class CodexAdapter:
             self._compatibility = await asyncio.to_thread(inspect_runtime, self.codex_path,
                 timeout=self.request_timeout, enable_local_actions=self.enable_local_actions)
             self._version = self._compatibility.get("codex_version")
+            if self._compatibility.get("runtime_bundle", {}).get("status") == "incomplete":
+                raise AdapterError("runtime_bundle_incomplete", "The selected Codex runtime lacks usable companion files. Select a complete installed runtime folder and restart the idle Bridge daemon; do not mix individual executables.")
             if not self._compatibility.get("ready"):
                 errors = self._compatibility.get("errors") or [{"message": "Codex App Server schema is incompatible"}]
                 raise AdapterError("unsupported_codex_schema", errors[0]["message"])
@@ -142,7 +201,7 @@ class CodexAdapter:
             self._stderr = asyncio.create_task(self._drain_stderr())
             try:
                 self._initialized = await self._rpc("initialize", {
-                    "clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.3.0"},
+                    "clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.3.1"},
                     "capabilities": {"experimentalApi": self.enable_local_actions},
                 })
                 await self._send({"method": "initialized", "params": {}})
@@ -156,6 +215,7 @@ class CodexAdapter:
             "adapter": "codex-app-server-stdio", "codex_version": self._version,
             "tested_versions": sorted(TESTED_VERSIONS), "ready": True,
             "compatibility": self._compatibility,
+            "native_tool_execution": "not_checked",
             "context_retention": "thread/resume", "cancellation": "turn/interrupt",
             "policies": ["read-only", "workspace-write"], "network_access": False,
             "approval_behavior": "deny-and-report", "model": "local-configured-default",
@@ -300,6 +360,15 @@ class CodexAdapter:
             if item.get("type") in {"reasoning", "userMessage"}:
                 return None
             base.update(item_id=item.get("id"), item_type=item.get("type"), status=item.get("status"))
+            if item.get("type") == "commandExecution":
+                if method == "item/completed":
+                    completion = _command_completion(item)
+                    if completion is None:
+                        return None
+                    base.update(item_id=completion["item_id"], status=completion["status"],
+                                exit_code=completion["exit_code"], duration_ms=completion["duration_ms"])
+                elif not _safe_item_identifier(item.get("id")) or item.get("status") not in (None, "inProgress"):
+                    return None
             if item.get("type") == "agentMessage":
                 base.update(text=str(item.get("text", ""))[:MAX_EVENT_TEXT], phase=item.get("phase"))
             return base
@@ -322,6 +391,8 @@ class CodexAdapter:
         incoming_turn = params.get("turnId") or params.get("turn", {}).get("id")
         if state.turn_id is not None and incoming_turn is not None and incoming_turn != state.turn_id:
             return
+        if method == "item/completed" and isinstance(params.get("item"), dict):
+            state.record_command(params.get("turnId"), params["item"])
         if method == "turn/started":
             state.turn_id = params.get("turn", {}).get("id") or state.turn_id
         if method == "item/completed" and params.get("item", {}).get("type") == "agentMessage":
@@ -459,6 +530,9 @@ class CodexAdapter:
             if not returned_turn_id or (state.turn_id is not None and state.turn_id != returned_turn_id):
                 raise AdapterError("invalid_turn_response", "Codex returned an inconsistent turn ID")
             state.turn_id = returned_turn_id
+            state.turn_confirmed = True
+            state.command_completions = {key: item for key, item in state.command_completions.items()
+                                         if key[0] == returned_turn_id}
             if on_started:
                 await on_started(thread_id, returned_turn_id)
             async with asyncio.timeout(self.run_timeout):
@@ -470,7 +544,8 @@ class CodexAdapter:
             final = [item["text"] for item in state.messages.values() if item.get("phase") == "final_answer"]
             if not final:
                 final = [item["text"] for item in state.messages.values()]
-            return {"thread_id": thread_id, "turn_id": state.turn_id, "status": terminal["status"], "text": "\n\n".join(final)[-MAX_TEXT:], "error": terminal.get("error"), "blocked_requests": state.blocked, "dropped_progress_events": state.dropped_events}
+            return {"thread_id": thread_id, "turn_id": state.turn_id, "status": terminal["status"], "text": "\n\n".join(final)[-MAX_TEXT:], "error": terminal.get("error"), "blocked_requests": state.blocked, "dropped_progress_events": state.dropped_events,
+                    "execution_evidence": state.execution_evidence()}
         except asyncio.CancelledError:
             if state and state.turn_id:
                 with contextlib.suppress(Exception):
@@ -481,7 +556,8 @@ class CodexAdapter:
                 with contextlib.suppress(Exception):
                     await self.cancel(state.thread_id, state.turn_id)
             code = exc.code if isinstance(exc, AdapterError) else ("run_timeout" if isinstance(exc, TimeoutError) else "adapter_error")
-            return {"thread_id": thread_id, "turn_id": state.turn_id if state else None, "status": "unknown" if code in {"app_server_timeout", "app_server_disconnected"} else "failed", "text": "", "error": {"code": code, "message": str(exc)[:MAX_EVENT_TEXT] or code}, "blocked_requests": state.blocked if state else []}
+            return {"thread_id": thread_id, "turn_id": state.turn_id if state else None, "status": "unknown" if code in {"app_server_timeout", "app_server_disconnected"} else "failed", "text": "", "error": {"code": code, "message": str(exc)[:MAX_EVENT_TEXT] or code}, "blocked_requests": state.blocked if state else [],
+                    "execution_evidence": (state or _Run(thread_id)).execution_evidence()}
         finally:
             if state and self._active.get(state.thread_id) is state:
                 state.cancelled = True
@@ -597,7 +673,8 @@ class TurnScopedCodexAdapter:
             raise AdapterError("adapter_closing", "Local bridge is shutting down")
         if thread_id and thread_id in self.by_thread:
             return {"thread_id": thread_id, "turn_id": None, "status": "failed", "text": "",
-                    "error": {"code": "thread_busy", "message": "A bridge turn already owns this conversation"}, "blocked_requests": []}
+                    "error": {"code": "thread_busy", "message": "A bridge turn already owns this conversation"}, "blocked_requests": [],
+                    "execution_evidence": _Run(thread_id).execution_evidence()}
         worker = self._new_worker()
         self.workers.add(worker)
         if thread_id:

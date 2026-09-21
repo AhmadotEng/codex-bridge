@@ -56,7 +56,9 @@ Then run on both:
 
 **Each Windows owner must sign in after a restart for Codex work to run.** Tailscale's unattended network mode is separate. This is owner-login startup, not a system service running Codex before login.
 
-Preflight separates runtime, local sign-in, SSH, forwarding, pairing, and project-scope checks. Status hides credentials, workspace paths, prompts, and logs. A registered startup task alone does not prove the peer is ready.
+Preflight separates runtime/schema and known bundle checks, local sign-in, SSH, forwarding, pairing, and project scope. It sends no model turn or native-command test. Status hides credentials, workspace paths, prompts, and logs.
+
+**Tasks arrive but tools cannot run?** Follow the [runtime readiness and repair guide](docs/RUNTIME.md). A completed reply or passing preflight does not prove native execution.
 
 On macOS/Linux, use `scripts/bridge.sh` with `start --background` and manual transport startup. The built-in owner-login registration is Windows-only.
 
@@ -109,10 +111,11 @@ Files up to 8 MiB use the original direct transfer. Larger files use verified, r
 
 ## Limits and details
 
-Compatibility is checked against the selected Codex executable's generated App Server schema. An incompatible runtime is refused. Schema compatibility is separate from real account, sandbox, and platform verification; see [test evidence and remaining checks](docs/TESTING.md).
+Compatibility is checked against the selected Codex executable's generated App Server schema. Incompatible schemas and incomplete known Windows bundles are refused. Unknown bundle layouts remain explicitly unverified. Schema compatibility and file presence are separate from actual execution; see [test evidence and remaining checks](docs/TESTING.md).
 
 - [Setup, new projects, chat ownership, and troubleshooting](docs/SETUP.md)
 - [Tailscale, Windows OpenSSH, migration, and recovery](docs/TAILSCALE.md)
+- [Complete Codex runtimes, native execution evidence, and repair](docs/RUNTIME.md)
 - [Implementation of the onboarding plan](docs/ONBOARDING-PLAN.md)
 - [Optional plugin installation, updates, revocation, and uninstall](docs/ADVANCED.md)
 - [Security boundaries](docs/SECURITY.md)

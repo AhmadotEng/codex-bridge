@@ -145,6 +145,8 @@ def setup(path, *, peer_id=None, codex=None, port=None, batch=False, prompt=inpu
     if sys.version_info < (3, 11):
         raise BridgeError('python_unsupported', 'Codex Bridge requires Python 3.11 or newer.')
     runtime = runtime_probe(selected_codex)
+    if _bundle_status(runtime) == 'incomplete':
+        raise BridgeError('runtime_bundle_incomplete', 'The selected Codex runtime is missing usable companion files. Select a complete installed runtime folder; do not copy or mix individual executables. Existing configuration was preserved.')
     if not runtime.get('ready'):
         raise BridgeError('runtime_incompatible', 'The selected Codex App Server schema is not compatible. Run preflight for a safe compatibility report.')
     if not existing:
@@ -166,6 +168,8 @@ def setup(path, *, peer_id=None, codex=None, port=None, batch=False, prompt=inpu
               'python_version': '.'.join(map(str, sys.version_info[:3])),
               'codex_version': runtime.get('codex_version'),
               'runtime_compatibility': runtime.get('compatibility'),
+              'runtime_bundle_status': _bundle_status(runtime),
+              'native_tool_execution': 'not_checked',
               'authentication': auth_status(selected_codex, runner=runner),
               'next_steps': ['Pair computers with pair-setup.',
                              'Select the existing SSH route with transport-config on its owner; the Tailscale guide covers ordinary OpenSSH over Tailscale.',
@@ -486,6 +490,12 @@ def _tcp_probe(host, port):
         return False
 
 
+def _bundle_status(runtime):
+    bundle = runtime.get('runtime_bundle')
+    status = bundle.get('status') if isinstance(bundle, dict) else None
+    return status if status in ('complete', 'incomplete', 'unknown', 'not_applicable') else 'unknown'
+
+
 def preflight(path, *, peer_id=None, project_id=None, runtime_probe=inspect_runtime,
               runner=_run, probe=peer_probe, tcp_probe=_tcp_probe, local_call=None):
     """Sanitized layered diagnostics: no configuration, paths, logs, or raw errors."""
@@ -505,10 +515,21 @@ def preflight(path, *, peer_id=None, project_id=None, runtime_probe=inspect_runt
         runtime = runtime_probe(cfg['codex_path'])
     except Exception:
         runtime = {'ready': False}
-    add('runtime', 'pass' if runtime.get('ready') else 'fail',
-        'runtime_compatible' if runtime.get('ready') else 'runtime_incompatible',
-        'Codex App Server schema is compatible.' if runtime.get('ready') else 'Codex App Server compatibility could not be verified.',
-        version=runtime.get('codex_version'))
+    schema_ready = runtime.get('schema_ready', runtime.get('ready')) is True
+    version = runtime.get('codex_version')
+    if not isinstance(version, str) or not re.fullmatch(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?', version):
+        version = None
+    add('runtime', 'pass' if schema_ready else 'fail',
+        'runtime_compatible' if schema_ready else 'runtime_incompatible',
+        'Codex App Server schema is compatible.' if schema_ready else 'Codex App Server compatibility could not be verified.',
+        version=version)
+    bundle = _bundle_status(runtime)
+    bundle_checks = {
+        'complete': ('pass', 'runtime_bundle_complete', 'The known Windows runtime has readable, nonempty companion files. This does not verify publisher, matching versions, or command execution.'),
+        'incomplete': ('fail', 'runtime_bundle_incomplete', 'The known Windows runtime lacks usable companion files. Select a complete installed runtime folder and restart the idle Bridge daemon; preserve its configuration and SSH route.'),
+        'unknown': ('unknown', 'runtime_bundle_unverified', 'No verified companion-file layout is defined for this runtime version. Schema fallback remains available; native command execution is unverified.'),
+        'not_applicable': ('pass', 'runtime_bundle_not_applicable', 'The Windows companion-file check does not apply on this platform. Native command execution is unverified.')}
+    add('runtime_bundle', *bundle_checks[bundle], required=bundle != 'unknown')
     auth = auth_status(cfg['codex_path'], runner=runner)
     add('authentication', auth['state'], auth['code'], auth['message'])
     try:
@@ -538,13 +559,13 @@ def preflight(path, *, peer_id=None, project_id=None, runtime_probe=inspect_runt
             if reachable.get('runtime_ready') is not None:
                 add('peer_runtime', 'pass' if reachable['runtime_ready'] else 'fail',
                     'peer_runtime_ready' if reachable['runtime_ready'] else 'peer_runtime_unavailable',
-                    'The other computer reports its Codex runtime is ready.' if reachable['runtime_ready'] else
+                    'The other computer reports its Codex runtime passed startup checks; native command execution is not proved.' if reachable['runtime_ready'] else
                     'Run preflight locally on the other computer to check its Codex runtime and sign-in.', **safe)
         elif reachable.get('ok') or reachable.get('code') in ('unauthorized', 'access_revoked', 'peer_mismatch'):
             add('forwarding', 'pass', 'endpoint_reachable', 'The forwarded endpoint is reachable.', **safe)
             add('pairing', 'fail', 'peer_identity_or_credential', 'The peer identity or pairing credential does not match; verify both invitation imports.', **safe)
         elif reachable.get('code') in ('unsupported_codex_schema', 'unsupported_codex_version',
-                'runtime_probe_failed', 'codex_not_found', 'authentication_required', 'not_logged_in'):
+                'runtime_bundle_incomplete', 'runtime_probe_failed', 'codex_not_found', 'authentication_required', 'not_logged_in'):
             auth_failure = reachable.get('code') in ('authentication_required', 'not_logged_in')
             add('forwarding', 'pass', 'endpoint_reachable', 'The other Bridge responds through the configured forward.', **safe)
             add('pairing', 'pass', 'peer_credential_accepted', 'The peer accepted the credential before checking its runtime.', **safe)
@@ -610,9 +631,10 @@ def preflight(path, *, peer_id=None, project_id=None, runtime_probe=inspect_runt
                     'peer_project_selected' if remote_project else 'peer_project_scope_missing',
                     'The other computer exposes the selected project to this pairing.' if remote_project else
                     'Run project-select on the other computer for this pairing and project.', project_id=remote_id, **safe)
-    return {'ok': all(item['state'] == 'pass' for item in checks), 'timestamp': now(),
+    return {'ok': all(item['state'] == 'pass' for item in checks if item.get('required', True)), 'timestamp': now(),
             'peer_id': cfg['peer_id'], 'checks': checks,
-            'note': 'This is a local read-only diagnostic. Run it on both computers to verify both directions. It does not execute a Codex task.'}
+            'native_tool_execution': 'not_checked',
+            'note': 'This is a local read-only diagnostic. Run it on both computers to verify both directions. It does not execute a Codex task or prove native tool execution. An unknown bundle layout is informational and uses schema fallback.'}
 
 
 def show_chat(path, session_id, *, open_chat=False, caller=None, opener=None):

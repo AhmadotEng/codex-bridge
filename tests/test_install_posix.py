@@ -23,8 +23,9 @@ class PortableInstallTests(unittest.TestCase):
         source = self.root/"source"; target = self.root/"installed"/"codex-bridge"
         for name in installer.REQUIRED:
             file = source/name; file.parent.mkdir(parents=True, exist_ok=True); file.write_text("fixture")
-        for name in (".git/config", "config.json", "codex_bridge/extra_private_module.py", "private_notes.txt", "state/data.json"):
+        for name in (".git/config", "config.json", "codex_bridge/extra_private_module.py", "private_notes.txt", "state/data.json", "Codex-Bridge-Friend-Runtime-Repair.md"):
             file = source/name; file.parent.mkdir(parents=True, exist_ok=True); file.write_text("private")
+        guide = source/'docs'/'RUNTIME.md'; guide.parent.mkdir(parents=True); guide.write_text('Generic runtime repair')
         target.mkdir(parents=True)
         local = target/"config.json"; local.write_text("owner config")
         installer.install(source, target, local)
@@ -32,6 +33,8 @@ class PortableInstallTests(unittest.TestCase):
         self.assertFalse((target/".git").exists())
         self.assertFalse((target/"codex_bridge"/"extra_private_module.py").exists())
         self.assertFalse((target/"private_notes.txt").exists())
+        self.assertFalse((target/"Codex-Bridge-Friend-Runtime-Repair.md").exists())
+        self.assertEqual((target/'docs'/'RUNTIME.md').read_text(), 'Generic runtime repair')
         self.assertEqual(json.loads((target/".mcp.json").read_text())["mcpServers"]["codex_bridge"]["command"], sys.executable)
 
     def test_missing_required_and_nested_targets_fail_before_copy(self):

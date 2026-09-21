@@ -26,7 +26,7 @@ If Python is not on PATH, select it explicitly:
 .\scripts\setup.ps1 -PythonExe 'C:\Path\To\python.exe'
 ```
 
-The assistant installs only allowed connector files, checks the local Codex schema, generates this computer's private configuration, and registers its MCP tools. It preserves existing computer identity, pairing, projects, and unrelated Codex settings. A conflicting `codex_bridge` MCP registration is reported for inspection rather than overwritten.
+The assistant installs only allowed connector files, checks the local Codex schema and known Windows runtime layout, generates this computer's private configuration, and registers its MCP tools. Select the executable inside a complete local Codex distribution, with its matching companion files. It preserves existing computer identity, pairing, projects, and unrelated Codex settings. A conflicting `codex_bridge` MCP registration is reported for inspection rather than overwritten.
 
 After pairing and project selection, Windows setup offers optional startup for the next owner login, with **no** as the default. Saying yes registers the local daemon and currently enabled paired transports; it does not start them immediately. Existing enabled startup settings are preserved.
 
@@ -136,7 +136,7 @@ On both:
 & $bridge autostart-status
 ```
 
-Read the individual checks. A registered task, running process, or listening SSH port does not prove authentication, forwarding, or a completed Codex task. Run preflight on **both** computers to check the reverse direction. Schedule restart/login testing after active work is finished and inspect readiness without manually starting Bridge.
+Read the individual checks. Preflight inspects schema, known bundle files, sign-in, and connection/scope configuration; it sends no model turn or project command. Even `ok` reports native execution as `not_checked`. A registered task, running process, or listening SSH port does not prove a completed Codex task. Run preflight on **both** computers to check the reverse direction. Schedule restart/login testing after active work is finished and inspect readiness without manually starting Bridge.
 
 ## 6. Prove collaboration
 
@@ -151,10 +151,11 @@ In a local Codex chat on B:
 Then verify:
 
 1. A follow-up remembers the prior request in the correct local conversation.
-2. A selected file in `bridge-export` arrives with the same SHA-256.
-3. A second project has its own session, folder, and conversation.
-4. Reconnecting and retrying with the same request ID does not repeat completed work.
-5. Cancelling active work and revoking a disposable pairing behave as expected.
+2. An authorized native command reads/hashes the selected test file in each direction. Inspect the completed task's structured `execution_evidence` and the file hash; a dialogue reply alone is insufficient. See the [bounded native-tool test](RUNTIME.md#prove-native-execution-in-the-existing-session).
+3. A selected file in `bridge-export` arrives with the same SHA-256.
+4. A second project has its own session, folder, and conversation.
+5. Reconnecting and retrying with the same request ID does not repeat completed work.
+6. Cancelling active work and revoking a disposable pairing behave as expected.
 
 Files above 8 MiB use asynchronous chunked transfers. Poll `artifact_transfer_status` until completion and check the final artifact hash. Retry an interrupted transfer with the original operation and request ID; use `artifact_transfer_cancel` to abandon unfinished data. Old peers support only the direct 8 MiB path.
 
@@ -207,6 +208,8 @@ Enable startup for the new route deliberately. Without `--peer`, transport contr
 | Check or symptom | Next action |
 | --- | --- |
 | Runtime schema incompatible | Select a compatible local Codex executable; do not bypass the check |
+| Runtime bundle incomplete | Select a complete local bundle with matching companions; follow [runtime repair](RUNTIME.md) |
+| Bundle layout unknown or reply completed without native execution | Inspect the local distribution and run the authorized native-tool test in [RUNTIME.md](RUNTIME.md); schema/dialogue success is insufficient |
 | Local sign-in missing | Sign into Codex on that computer, then rerun preflight |
 | Startup enabled but no Codex execution | Sign into the owning Windows account and inspect `autostart-status`; network services alone are insufficient |
 | Local Bridge unavailable | Start its daemon and check for an occupied listen port |

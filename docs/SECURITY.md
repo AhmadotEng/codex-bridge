@@ -34,6 +34,8 @@ Different sessions retain different context and conversation IDs. Sessions seria
 
 Workers run the locally installed Codex App Server with the local model default. The adapter checks the selected executable's generated schema against the requests, policies, responses, and notifications it needs; incompatible contracts are refused. Schema acceptance is separate from behavioral verification. It uses retained `thread/start` or `thread/resume` conversations owned by the bridge and never searches arbitrary personal conversations for a match.
 
+Known Windows bundle profiles also check required companion-file presence and readability. This is not signature, distribution-hash, architecture, version-consistency, or execution verification. Select a complete trusted local runtime; do not mix binaries across versions or copy authentication to repair it. Unknown layouts remain explicitly unverified. Static preflight sends no model turn or project command. [Runtime repair](RUNTIME.md) preserves scopes and existing account settings.
+
 The default task policy is `read-only`. `workspace-write` must be chosen in local project configuration and restricts the writable roots requested from Codex to the selected workspace. Network access is disabled for worker execution. Approval requests and unsupported interactive prompts are denied and reported; they are not silently approved or redirected to another account.
 
 These policies rely on Codex's sandbox implementation and the host operating system. They are **not a hard read container**: a read-only policy prevents requested writes, but does not guarantee that the worker cannot read every other file visible to its Windows account. Use a separately restricted operating-system account or stronger isolation if that is required. Do not authorize task execution for a peer who should not be trusted with the resulting project outputs.
@@ -47,6 +49,8 @@ Each file transfer is one explicitly selected file. Files up to 8 MiB use direct
 The receiver checks chunk and final byte lengths and SHA-256 and archives the artifact reference. A different existing destination is not overwritten. Identical transfers can be retried using the same operation ID. Large transfers stage data privately before publishing the completed file. Archive/staging quotas do not include completed files retained in the owner's selected import folders. This protects the bridge's transfer boundary; it is separate from the read/write abilities of an explicitly authorized Codex task.
 
 Task prompts, progress, results, messages, and transferred logs can contain project information. Inspect them before exporting beyond the selected collaboration. Do not place account credentials or private keys in an export root. Peer text should be treated as untrusted content when included in later Codex prompts.
+
+Structured native-command evidence uses App Server completion items from the confirmed conversation/turn and omits raw commands, working directories, environment, and output. It records bounded execution metadata, not a trust verdict about a command or its effects. Dialogue completion, process exit zero, and file delivery are distinct evidence; check expected file bytes/hash and project behavior separately.
 
 ## Retries, interruption, and revocation
 

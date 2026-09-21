@@ -75,6 +75,24 @@ The integrated source was installed into a fresh temporary directory with its ow
 
 This used Windows, Python 3.11, and Codex 0.153.4. It executed no model turns, did not restart the computer, and did not change either existing Bridge installation. Automated tests separately cover independent peer startup, stale process identities, stop/start races, and Windows child cleanup after supervisor termination.
 
+## Deployed runtime repair evidence
+
+In the separately deployed **0.1** branch, a selected Windows **0.155.0-alpha.2.6** runtime contained `codex.exe` but lacked the three observed companions listed in [RUNTIME.md](RUNTIME.md). App Server accepted tasks and produced replies while native tool execution failed. The evidence did not establish when or why the files became absent.
+
+Only `codex_path` changed, selecting an already installed complete **0.153.4** distribution. Local executable hashes matched a previously verified distribution manifest and Windows reported valid publisher signatures. No binaries were downloaded or mixed across versions. Account configuration, model settings, scopes, local actions, pairing, transports, and startup registration remained unchanged.
+
+After an idle daemon restart through the existing owner-login task, the same retained conversation completed a native PowerShell command with exit code zero. It read a selected tiny input, refused an existing output overwrite, created a proof file, and calculated its SHA-256. The selected output was independently retrieved and matched the expected bytes/hash. Actual command evidence was inspected from App Server history; dialogue completion alone was not treated as proof.
+
+This establishes native execution for that existing deployment and task. It does not establish gameplay readiness, a fresh two-user setup, or end-to-end acceptance of the public **0.3.1** package. Private paths, IDs, hashes, proof files, and repair reports are excluded from this repository.
+
+## Public 0.3.1 runtime checks
+
+The public update adds known Windows bundle checks alongside schema compatibility, explicit static-preflight limits, and per-turn structured command evidence. The [runtime guide](RUNTIME.md) distinguishes schema acceptance, companion-file checks, actual native execution, and verification of file effects.
+
+The Windows/Python 3.11 run passed **212 isolated tests**, with three POSIX-only tests skipped. Coverage includes incomplete, empty, unreadable, and invalid companions; schema-compatible unknown layouts; configuration preservation during runtime selection; and bounded command evidence with duplicate, foreign-turn, malformed, and early notifications. Both installer allowlists include the runtime guide and exclude the private repair report. The installed complete Codex 0.153.4 bundle also passed a read-only version/schema/bundle probe, which explicitly reported native execution as `not_checked`.
+
+Assess its isolated tests and the CI result for the published commit separately from the deployed repair above. Static preflight does not run a model turn or project command. Unknown runtime layouts remain unverified even if their generated schema is compatible.
+
 ## Remaining deployment verification
 
 - Two new users completing the public guide with separate accounts and their own SSH connection.

@@ -1,6 +1,6 @@
 {
   "name": "codex-bridge",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Exchange scoped project tasks, messages, and selected files with a paired Codex computer over an existing SSH transport.",
   "author": {
     "name": "AhmadotEng"

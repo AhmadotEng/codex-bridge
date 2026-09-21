@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -7,7 +8,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from codex_bridge.codex_adapter import AdapterError, CodexAdapter, _Run
+from codex_bridge.codex_adapter import AdapterError, CodexAdapter, _Run, MAX_EXECUTION_ITEMS, MAX_EXECUTION_TRACKED
 
 
 class FakeAdapter(CodexAdapter):
@@ -238,6 +239,161 @@ enabled = true
         self.assertTrue(process.killed)
         self.assertTrue(process._transport.closed)
         self.assertIsNone(self.adapter._proc)
+
+    @staticmethod
+    def command_item(item_id='exec-proof', **changes):
+        return {'id': item_id, 'type': 'commandExecution', 'status': 'completed',
+                'exitCode': 0, 'durationMs': 284, 'command': 'PRIVATE-COMMAND-SENTINEL',
+                'cwd': 'PRIVATE-PATH-SENTINEL', 'aggregatedOutput': 'PRIVATE-OUTPUT-SENTINEL',
+                'env': {'PRIVATE_ENV': 'PRIVATE-TOKEN-SENTINEL'}, **changes}
+
+    async def test_native_evidence_uses_completed_items_and_never_agent_claims(self):
+        original = self.adapter._rpc
+        async def rpc(method, params):
+            result = await original(method, params)
+            if method == 'turn/start':
+                self.adapter._notification('item/completed', {'threadId': params['threadId'],
+                    'turnId': result['turn']['id'], 'item': self.command_item()})
+            return result
+        self.adapter._rpc = rpc
+        events = []
+        async def event(value): events.append(value)
+        result = await self.adapter.run(self.workspace, 'Tool worked; files are verified.', on_event=event)
+        evidence = result['execution_evidence']
+        self.assertEqual(evidence['native_command_execution'], 'observed')
+        self.assertEqual((evidence['thread_id'], evidence['turn_id']), (result['thread_id'], result['turn_id']))
+        self.assertEqual(evidence['command_items_total'], 1)
+        self.assertEqual(evidence['execution_observed_count'], 1)
+        self.assertEqual(evidence['successful_exit_count'], 1)
+        self.assertEqual(evidence['items'], [{'item_id': 'exec-proof', 'status': 'completed',
+                                             'exit_code': 0, 'duration_ms': 284}])
+        self.assertNotIn('PRIVATE-', json.dumps({'evidence': evidence, 'events': events}))
+        self.adapter._rpc = original
+        dialogue = await self.adapter.run(self.workspace, 'I executed PowerShell successfully; exitCode 0, durationMs 284.')
+        self.assertEqual(dialogue['status'], 'completed')
+        self.assertEqual(dialogue['execution_evidence']['native_command_execution'], 'not_observed')
+        self.assertEqual(dialogue['execution_evidence']['command_items_total'], 0)
+
+    async def test_evidence_scopes_early_commands_to_confirmed_turn_and_deduplicates(self):
+        original = self.adapter._rpc
+        async def rpc(method, params):
+            if method != 'turn/start':
+                return await original(method, params)
+            thread, turn = params['threadId'], f'turn-{self.adapter.serial}'
+            self.adapter._notification('item/completed', {'threadId': thread, 'turnId': 'stale-turn',
+                'item': self.command_item('exec-stale')})
+            self.adapter._notification('item/completed', {'threadId': 'other-thread', 'turnId': turn,
+                'item': self.command_item('exec-other-project')})
+            self.adapter._notification('item/completed', {'threadId': thread,
+                'item': self.command_item('exec-missing-turn')})
+            event = {'threadId': thread, 'turnId': turn, 'item': self.command_item('exec-early')}
+            self.adapter._notification('item/completed', event)
+            self.adapter._notification('item/completed', event)
+            self.assertEqual(self.adapter._active[thread].execution_evidence()['native_command_execution'], 'not_observed')
+            result = await original(method, params)
+            self.adapter._notification('item/completed', event)
+            return result
+        self.adapter._rpc = rpc
+        result = await self.adapter.run(self.workspace, 'hello')
+        evidence = result['execution_evidence']
+        self.assertEqual(evidence['command_items_total'], 1)
+        self.assertEqual(evidence['items'][0]['item_id'], 'exec-early')
+        self.assertEqual(evidence['native_command_execution'], 'observed')
+
+    async def test_native_failure_and_missing_exit_are_not_success_claims(self):
+        original = self.adapter._rpc
+        async def rpc(method, params):
+            result = await original(method, params)
+            if method == 'turn/start':
+                for item in (self.command_item('exec-error', status='failed', exitCode=5),
+                             self.command_item('exec-launch-error', status='failed', exitCode=None, durationMs=None),
+                             self.command_item('exec-declined', status='declined', exitCode=None, durationMs=None)):
+                    self.adapter._notification('item/completed', {'threadId': params['threadId'],
+                        'turnId': result['turn']['id'], 'item': item})
+            return result
+        self.adapter._rpc = rpc
+        result = await self.adapter.run(self.workspace, 'done')
+        evidence = result['execution_evidence']
+        self.assertEqual(evidence['command_items_total'], 3)
+        self.assertEqual(evidence['native_command_execution'], 'observed')
+        self.assertEqual(evidence['execution_observed_count'], 1)
+        self.assertEqual(evidence['successful_exit_count'], 0)
+        self.assertEqual(evidence['unsuccessful_exit_count'], 1)
+        state = _Run('thread', turn_id='turn', turn_confirmed=True)
+        state.record_command('turn', self.command_item(status='failed', exitCode=None))
+        self.assertEqual(state.execution_evidence()['native_command_execution'], 'not_observed')
+
+    async def test_malformed_command_metadata_and_nonterminal_events_do_not_count(self):
+        state = _Run('thread', turn_id='turn', turn_confirmed=True)
+        self.adapter._active['thread'] = state
+        invalid = [{'exitCode': True}, {'exitCode': False}, {'exitCode': '0'}, {'exitCode': 0.0},
+                   {'exitCode': 2 ** 32}, {'exitCode': -(2 ** 31) - 1}, {'durationMs': True},
+                   {'durationMs': -1}, {'durationMs': 2 ** 53}, {'durationMs': '284'},
+                   {'durationMs': .5}, {'status': 'inProgress'}, {'status': 'unknown'},
+                   {'status': 'declined', 'exitCode': 0}, {'id': 'C:/private/path'}, {'id': 'x' * 129}]
+        for change in invalid:
+            self.adapter._notification('item/completed', {'threadId': 'thread', 'turnId': 'turn',
+                'item': self.command_item(**change)})
+        self.adapter._notification('item/started', {'threadId': 'thread', 'turnId': 'turn',
+            'item': self.command_item('exec-started', status='inProgress')})
+        self.adapter._notification('item/completed', {'threadId': 'thread', 'turnId': 'turn',
+            'item': {'id': 'agent', 'type': 'agentMessage', 'text': json.dumps(self.command_item())}})
+        self.assertEqual(state.execution_evidence()['command_items_total'], 0)
+        self.assertEqual(state.execution_evidence()['native_command_execution'], 'not_observed')
+
+    async def test_evidence_is_bounded_independently_of_dropped_progress(self):
+        state = _Run('thread', turn_id='turn', turn_confirmed=True)
+        self.adapter._active['thread'] = state
+        for index in range(MAX_EXECUTION_TRACKED + 9):
+            item = self.command_item('exec-' + str(index))
+            self.adapter._notification('item/completed', {'threadId': 'thread', 'turnId': 'turn', 'item': item})
+            self.adapter._notification('item/completed', {'threadId': 'thread', 'turnId': 'turn', 'item': item})
+        evidence = state.execution_evidence()
+        self.assertEqual(evidence['command_items_total'], MAX_EXECUTION_TRACKED)
+        self.assertEqual(len(evidence['items']), MAX_EXECUTION_ITEMS)
+        self.assertEqual(evidence['omitted_items'], MAX_EXECUTION_TRACKED - MAX_EXECUTION_ITEMS)
+        self.assertTrue(evidence['tracking_limit_reached'])
+        self.assertGreater(state.dropped_events, 0)
+        self.assertLessEqual(len(state.command_completions), MAX_EXECUTION_TRACKED)
+        early = _Run('other-thread')
+        for index in range(MAX_EXECUTION_TRACKED + 9):
+            early.record_command('foreign-' + str(index), self.command_item('exec-' + str(index)))
+        self.assertEqual(len(early.command_completions), MAX_EXECUTION_TRACKED)
+        self.assertEqual(early.execution_evidence()['native_command_execution'], 'not_observed')
+
+    async def test_timeout_retains_observed_native_execution_without_claiming_turn_success(self):
+        original = self.adapter._rpc
+        async def rpc(method, params):
+            result = await original(method, params)
+            if method == 'turn/start':
+                self.adapter._notification('item/completed', {'threadId': params['threadId'],
+                    'turnId': result['turn']['id'], 'item': self.command_item()})
+            return result
+        self.adapter._rpc = rpc
+        self.adapter.run_timeout = .01
+        result = await self.adapter.run(self.workspace, 'wait')
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['error']['code'], 'run_timeout')
+        self.assertEqual(result['execution_evidence']['native_command_execution'], 'observed')
+        self.assertEqual([method for method, _ in self.adapter.calls].count('turn/start'), 1)
+
+    async def test_inconsistent_turn_reply_does_not_promote_unconfirmed_command_evidence(self):
+        original = self.adapter._rpc
+        async def rpc(method, params):
+            result = await original(method, params)
+            if method == 'turn/start':
+                self.adapter._notification('item/completed', {'threadId': params['threadId'],
+                    'turnId': result['turn']['id'], 'item': self.command_item()})
+                return {'turn': {'id': 'inconsistent-turn', 'status': 'inProgress'}}
+            return result
+        self.adapter._rpc = rpc
+        result = await self.adapter.run(self.workspace, 'done')
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['error']['code'], 'invalid_turn_response')
+        self.assertEqual(result['execution_evidence']['native_command_execution'], 'not_observed')
+        self.assertIsNone(result['execution_evidence']['turn_id'])
+        self.assertEqual(result['execution_evidence']['command_items_total'], 0)
+        self.assertEqual([method for method, _ in self.adapter.calls].count('turn/start'), 1)
 
 
 if __name__ == "__main__":

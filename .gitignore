@@ -50,6 +50,7 @@ bridge-import/
 *.obb
 /THIS-PAIR.md
 /Codex-Bridge-Tailscale-Implementation-Report.md
+/Codex-Bridge-Friend-Runtime-Repair.md
 /docs/tailscale-verification.json
 /docs/verification.json
 # Editors and OS

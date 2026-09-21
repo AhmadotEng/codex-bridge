@@ -70,6 +70,12 @@ Finish or cancel active Bridge tasks. On Windows, disable future startup, then s
 
 An MCP-only installation at the same path needs no new registration. A plugin installation needs the cachebuster/reinstall flow above and a fresh Codex conversation to load the new tools. Do not register both routes.
 
+## Change only the Codex runtime
+
+For missing runtime helpers or a different local Codex selection, use the [path-only repair procedure](RUNTIME.md#repair-only-the-selected-runtime). Finish active tasks, stop only the local daemon, run `setup --codex FULL_PATH --batch`, and use `start` with the existing launch configuration. Preserve working transports, pairing, model/authentication settings, project scopes, sessions, and startup registration. Do not copy individual helpers between versions or overwrite state with an old backup.
+
+Static schema and bundle checks do not execute a native command. Verify the repair with an authorized command in the retained conversation and inspect `execution_evidence`; verify selected file bytes/hash separately where applicable.
+
 ## Windows owner-login startup
 
 `autostart-enable` is an explicit local-owner operation. Its default `--component auto` registers the daemon and currently enabled paired SSH transports. It snapshots that selection: a later peer is not silently added. Select one route with `--component transport --peer ID`, or only the daemon with `--component daemon`.

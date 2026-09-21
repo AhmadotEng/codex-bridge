@@ -273,6 +273,68 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn('peer_runtime', failures)
         self.assertNotIn('forwarding', failures)
 
+    def test_missing_runtime_companions_preserve_existing_configuration_and_scopes(self):
+        self.paired()
+        before = self.a.read_bytes()
+        with self.assertRaises(BridgeError) as failure:
+            onboarding.setup(self.a, codex=sys.executable, batch=True, runner=local_runner,
+                runtime_probe=lambda _: {'ready': False, 'schema_ready': True,
+                    'compatibility': 'schema-validated',
+                    'runtime_bundle': {'status': 'incomplete'},
+                    'errors': [{'message': 'PRIVATE-PATH'}]})
+        self.assertEqual(failure.exception.code, 'runtime_bundle_incomplete')
+        self.assertNotIn('PRIVATE-PATH', str(failure.exception))
+        self.assertEqual(self.a.read_bytes(), before)
+
+    def test_runtime_path_repair_changes_only_selected_path(self):
+        self.paired()
+        cfg = cli.read(self.a)
+        cfg['codex_path'] = str(self.root / 'old-incomplete-runtime')
+        cfg['listen_port'] = 49990
+        cfg['projects']['existing'] = {'local_actions': {'fixture': {'argv': ['fixed']}}}
+        cfg['ssh_transports'] = {'computer-b': {'enabled': False, 'owner_extension': 'preserved'}}
+        cli.save(self.a, cfg)
+        result = onboarding.setup(self.a, codex=sys.executable, batch=True,
+            runtime_probe=lambda _: {**compatible(None), 'runtime_bundle': {'status': 'complete'}},
+            runner=local_runner)
+        repaired = cli.read(self.a)
+        self.assertEqual(Path(repaired.pop('codex_path')), Path(sys.executable).resolve())
+        cfg.pop('codex_path')
+        self.assertEqual(repaired, cfg)
+        self.assertEqual(result['runtime_bundle_status'], 'complete')
+        self.assertEqual(result['native_tool_execution'], 'not_checked')
+        self.assertNotIn('registration', result)
+
+    def test_preflight_separates_schema_bundle_and_native_execution(self):
+        self.paired()
+        for status, ok in (('complete', True), ('incomplete', False), ('unknown', True), ('not_applicable', True)):
+            with self.subTest(status=status):
+                result = onboarding.preflight(self.a,
+                    runtime_probe=lambda _: {'schema_ready': True, 'ready': status != 'incomplete',
+                        'codex_version': 'PRIVATE-PATH', 'runtime_bundle': {
+                            'status': status, 'missing_files': ['PRIVATE-FILENAME'], 'error': 'PRIVATE-ERROR'}},
+                    runner=local_runner,
+                    probe=lambda _: {'ok': True, 'peer_id': 'computer-b', 'runtime_ready': True},
+                    local_call=lambda *a, **k: {'ok': True})
+                self.assertEqual(result['ok'], ok, result)
+                self.assertEqual(next(row['state'] for row in result['checks'] if row['category'] == 'runtime'), 'pass')
+                self.assertEqual(result['native_tool_execution'], 'not_checked')
+                self.assertNotIn('PRIVATE-', json.dumps(result))
+                if status == 'unknown':
+                    row = next(row for row in result['checks'] if row['category'] == 'runtime_bundle')
+                    self.assertEqual(row['state'], 'unknown')
+                    self.assertFalse(row['required'])
+
+    def test_peer_bundle_failure_does_not_report_broken_forwarding(self):
+        self.paired()
+        result = onboarding.preflight(self.a, runtime_probe=compatible, runner=local_runner,
+            probe=lambda _: {'ok': False, 'code': 'runtime_bundle_incomplete', 'message': 'PRIVATE-PATH'},
+            local_call=lambda *a, **k: {'ok': True})
+        self.assertFalse(result['ok'])
+        self.assertEqual(next(row['state'] for row in result['checks'] if row['category'] == 'forwarding'), 'pass')
+        self.assertIn('peer_runtime', [row['category'] for row in result['checks'] if row['state'] == 'fail'])
+        self.assertNotIn('PRIVATE-PATH', json.dumps(result))
+
     def test_preflight_never_emits_raw_auth_or_runtime_errors(self):
         self.initialize()
         def runtime(_):

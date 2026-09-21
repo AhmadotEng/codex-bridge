@@ -3,7 +3,9 @@
 A version string is informational. The executable's generated schema must accept
 the requests Bridge sends and describe the response/notification fields it uses.
 Schema compatibility does not claim that an untested platform has passed gameplay
-or a real Codex turn. Runtime policy and ownership checks remain in the adapter.
+or a real Codex turn. Known Windows bundles additionally need readable, nonempty
+companion files. Their presence does not verify publisher, hash, or execution.
+Runtime policy and ownership checks remain in the adapter.
 """
 from __future__ import annotations
 
@@ -12,12 +14,82 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import stat
 import subprocess
+import sys
 import tempfile
 from typing import Any
 
 TESTED_VERSIONS = frozenset({"0.153.4", "0.155.0-alpha.2.6"})
 MAX_SCHEMA_BYTES = 32 * 1024 * 1024
+WINDOWS_BUNDLE_PROFILES = {
+    version: ("codex-code-mode-host.exe", "codex-command-runner.exe", "codex-windows-sandbox-setup.exe")
+    for version in ("0.153.4", "0.155.0-alpha.2.6")
+}
+
+
+def inspect_runtime_bundle(codex_path: str | Path, version: str | None, *, platform: str | None = None) -> dict:
+    """Inspect only observed bundle layouts; never execute or hash companion files.
+
+    Work is bounded to three fixed sibling names and at most one byte per file.
+    Unknown layouts keep schema fallback available but are explicitly unverified.
+    Results contain only fixed filenames, never configured paths or OS errors.
+    """
+    platform = sys.platform if platform is None else platform
+    result = {"status": "not_applicable" if platform != "win32" else "unknown",
+              "profile": None, "check": "not_checked", "required_files": [],
+              "checked_files": [], "missing_files": [], "unreadable_files": [],
+              "empty_files": [], "invalid_files": []}
+    if platform != "win32" or version not in WINDOWS_BUNDLE_PROFILES:
+        return result
+    required = WINDOWS_BUNDLE_PROFILES[version]
+    result.update(status="complete", profile=version,
+                  check="nonempty_regular_readable_siblings", required_files=list(required))
+    try:
+        executable = Path(codex_path)
+        # Match a bare command selected from PATH; explicit paths stay explicit.
+        if executable.parent == Path(".") and not executable.is_file():
+            located = shutil.which(str(codex_path))
+            if located:
+                executable = Path(located)
+        directory = executable.parent
+    except (OSError, ValueError, TypeError):
+        result["unreadable_files"] = list(required)
+        result["status"] = "incomplete"
+        return result
+    for name in required:
+        candidate = directory / name
+        try:
+            info = candidate.lstat()
+            if (not stat.S_ISREG(info.st_mode)
+                    or getattr(info, "st_file_attributes", 0) & 1024):
+                result["invalid_files"].append(name)
+                continue
+            if not info.st_size:
+                result["empty_files"].append(name)
+                continue
+            # Avoid following a final-component link or blocking on a FIFO if a
+            # file changes between metadata inspection and open on POSIX tests.
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            descriptor = os.open(candidate, flags)
+            try:
+                opened = os.fstat(descriptor)
+                if not stat.S_ISREG(opened.st_mode):
+                    result["invalid_files"].append(name)
+                elif not opened.st_size or not os.read(descriptor, 1):
+                    result["empty_files"].append(name)
+                else:
+                    result["checked_files"].append(name)
+            finally:
+                os.close(descriptor)
+        except FileNotFoundError:
+            result["missing_files"].append(name)
+        except (OSError, ValueError):
+            result["unreadable_files"].append(name)
+    if len(result["checked_files"]) != len(required):
+        result["status"] = "incomplete"
+    return result
 
 
 class SchemaMismatch(ValueError):
@@ -157,7 +229,7 @@ def validate_schema_bundle(directory: str | Path, *, enable_local_actions: bool 
     common = {"cwd": workspace, "approvalPolicy": "never", "approvalsReviewer": "user",
               "sandbox": "read-only", "config": {}, "developerInstructions": "Scoped project task"}
     samples = {
-        "initialize": {"clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.3.0"}, "capabilities": {"experimentalApi": enable_local_actions}},
+        "initialize": {"clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.3.1"}, "capabilities": {"experimentalApi": enable_local_actions}},
         "thread/start": {**common, "ephemeral": False},
         "thread/resume": {**common, "threadId": "bridge-thread", "excludeTurns": True},
         "thread/name/set": {"threadId": "bridge-thread", "name": "Bridge: Example"},
@@ -215,7 +287,10 @@ def validate_schema_bundle(directory: str | Path, *, enable_local_actions: bool 
 
 def inspect_runtime(codex_path: str | Path, *, timeout: float = 30, enable_local_actions: bool = False) -> dict:
     """Return sanitized local compatibility status. Executable/config paths stay local."""
-    result = {"ready": False, "codex_version": None, "compatibility": "unavailable", "errors": []}
+    result = {"ready": False, "schema_ready": False, "codex_version": None,
+              "compatibility": "unavailable", "errors": [],
+              "runtime_bundle": inspect_runtime_bundle(codex_path, None),
+              "native_tool_execution": "not_checked"}
     kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
     try:
         version = subprocess.run([str(codex_path), "--version"], capture_output=True, timeout=timeout, **kwargs)
@@ -224,6 +299,10 @@ def inspect_runtime(codex_path: str | Path, *, timeout: float = 30, enable_local
             raise SchemaMismatch("Configured executable did not report a Codex CLI version")
         result["codex_version"] = match.group(1).decode("ascii")
         result["version_previously_tested"] = result["codex_version"] in TESTED_VERSIONS
+        result["runtime_bundle"] = inspect_runtime_bundle(codex_path, result["codex_version"])
+        if result["runtime_bundle"]["status"] == "incomplete":
+            result["errors"].append({"code": "runtime_bundle_incomplete", "message":
+                "Known Windows Codex bundle is incomplete; select a complete local distribution and do not mix individual executables"})
         with tempfile.TemporaryDirectory(prefix="codex-bridge-schema-") as directory:
             args = [str(codex_path), "app-server", "generate-json-schema", "--out", directory]
             if enable_local_actions:
@@ -231,11 +310,15 @@ def inspect_runtime(codex_path: str | Path, *, timeout: float = 30, enable_local
             generated = subprocess.run(args, capture_output=True, timeout=timeout, **kwargs)
             if generated.returncode:
                 raise SchemaMismatch("Codex could not generate its App Server schema; update Codex or select another local executable")
-            result.update(validate_schema_bundle(directory, enable_local_actions=enable_local_actions))
+            schema = validate_schema_bundle(directory, enable_local_actions=enable_local_actions)
+            result["schema_ready"] = schema.pop("ready")
+            result["errors"].extend(schema.pop("errors"))
+            result.update(schema)
     except subprocess.TimeoutExpired:
         result["errors"].append({"code": "runtime_probe_timeout", "message": "Codex compatibility probe timed out"})
     except (OSError, ValueError, KeyError, TypeError) as exc:
         # Never surface executable stderr, config values, or full local paths.
         message = str(exc) if isinstance(exc, SchemaMismatch) else "Codex executable or generated App Server schema could not be read"
         result["errors"].append({"code": "runtime_probe_failed", "message": message[:240]})
+    result["ready"] = result["schema_ready"] and result["runtime_bundle"]["status"] != "incomplete"
     return result
