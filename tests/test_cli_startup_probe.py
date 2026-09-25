@@ -98,14 +98,27 @@ class StartupProbeTests(unittest.TestCase):
                 self.assertEqual(cli._startup_probe_timeout(), expected)
 
     def test_real_closed_loopback_allows_one_launch_after_explicit_refusal(self):
-        # Reserve without listening: no other process can race to claim this
-        # isolated port, and Windows may take about 2.05s to return WSAECONNREFUSED.
+        # Allocate then close the socket: macOS may drop connections to a bound
+        # but non-listening socket instead of refusing them. The launch remains
+        # mocked, and recording the real refusal below prevents a port-reuse
+        # race or timeout from being mistaken for successful absence detection.
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved:
             if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
                 reserved.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
             reserved.bind(('127.0.0.1', 0))
             self.set_port(reserved.getsockname()[1])
+        errors = []
+        real_call = cli.call
+        def observed_probe(*args, **kwargs):
+            try:
+                return real_call(*args, **kwargs)
+            except OSError as exc:
+                errors.append(exc)
+                raise
+        with mock.patch.object(cli, 'call', side_effect=observed_probe):
             result = cli._start_daemon(self.path, resume=False)
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(cli.connection_refused(errors[0]))
         self.assertIsInstance(result, tuple)
         self.launch.assert_called_once_with(self.path, 'serve')
         self.interactive.assert_not_called()
