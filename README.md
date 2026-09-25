@@ -15,6 +15,8 @@ Let two people's Codex installations exchange project tasks, replies, and select
 
 ## Install on both computers
 
+**Windows upgrade hold:** a live rc.3 upgrade hit `local_endpoint_unverified` before daemon launch. Keep an existing working Windows installation until the follow-up fix is verified. The Linux service checks passed; see [current verification details](docs/TESTING.md).
+
 Use local Python 3.11+, a complete Codex installation signed into your own account, and OpenSSH. Download and extract the matching installer from the [0.3.2 release candidate](https://github.com/AhmadotEng/codex-bridge/releases/tag/v0.3.2-rc.3). Compare its SHA-256 with that release's `SHA256SUMS`.
 
 | Download | Run inside the extracted `codex-bridge` folder |
