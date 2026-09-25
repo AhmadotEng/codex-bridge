@@ -24,6 +24,8 @@ class ConnectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await test_core.CoreIntegrationTests.asyncSetUp(self)
         self.carriers = {}
         self.channels = set()
+        self.carrier_channels = {}
+        self.carrier_writers = {}
         self.opens = []
         reservations = [socket.socket() for _ in range(4)]
         for item in reservations: item.bind(('127.0.0.1', 0))
@@ -33,22 +35,28 @@ class ConnectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                       'beta': {'alpha': ports[2], 'beta': ports[3]}}
         for node, peer in (('alpha', 'beta'), ('beta', 'alpha')):
             self.configs[node]['connections'] = {peer: {'lanes': self.lanes,
-                'initial_attempts': 1, 'initial_seconds': 4,
-                'recovery_attempts': 1, 'recovery_seconds': 4, 'idle_seconds': 1}}
+                'initial_attempts': 1, 'initial_seconds': 20,
+                'recovery_attempts': 1, 'recovery_seconds': 20, 'idle_seconds': 1}}
             self.save_config(node)
             manager = self.bridges[node].connections
 
             async def open_candidate(peer, candidate, node=node, manager=manager):
                 self.opens.append((node, candidate['attempt_id']))
                 self.assertGreater(manager._state(peer)['episode']['attempts'], 0)
+                carrier_key = (node, candidate['attempt_id'])
+                self.carrier_channels[carrier_key] = set()
+                self.carrier_writers[carrier_key] = set()
                 listeners = []
                 for source, target in ((node, peer), (peer, node)):
                     target_port = self.configs[target]['listen_port']
-                    async def forward(reader, writer, target_port=target_port):
+                    async def forward(reader, writer, target_port=target_port, carrier_key=carrier_key):
                         task = asyncio.current_task(); self.channels.add(task)
+                        self.carrier_channels.setdefault(carrier_key, set()).add(task)
+                        self.carrier_writers.setdefault(carrier_key, set()).add(writer)
                         remote = None
                         try:
                             remote_reader, remote = await asyncio.open_connection('127.0.0.1', target_port)
+                            self.carrier_writers.setdefault(carrier_key, set()).add(remote)
                             async def copy(incoming, outgoing):
                                 while data := await incoming.read(65536):
                                     outgoing.write(data); await outgoing.drain()
@@ -60,13 +68,25 @@ class ConnectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                             writer.close()
                             if remote: remote.close()
                             self.channels.discard(task)
+                            self.carrier_channels.get(carrier_key, set()).discard(task)
+                            self.carrier_writers.get(carrier_key, set()).discard(writer)
+                            if remote: self.carrier_writers.get(carrier_key, set()).discard(remote)
                     listeners.append(await asyncio.start_server(forward, '127.0.0.1', self.lanes[node][source]))
                 self.carriers[(node, candidate['attempt_id'])] = listeners
                 await manager._verify(peer, candidate)
 
             async def close_owner(peer, attempt, node=node):
-                for server in self.carriers.pop((node, attempt), []):
-                    server.close(); await server.wait_closed()
+                key = (node, attempt)
+                listeners = self.carriers.pop(key, [])
+                # SSH death removes both listeners and all their channels.
+                # Python 3.12+ wait_closed also waits for active clients, so
+                # never wait for one listener while the other still accepts.
+                for server in listeners: server.close()
+                channels = self.carrier_channels.pop(key, set())
+                for writer in self.carrier_writers.pop(key, set()): writer.close()
+                for task in channels: task.cancel()
+                await asyncio.gather(*channels, return_exceptions=True)
+                await asyncio.gather(*(server.wait_closed() for server in listeners))
 
             async def close_losers(peer, winner, node=node, close_owner=close_owner):
                 for origin, attempt in list(self.carriers):
@@ -78,11 +98,11 @@ class ConnectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         for bridge in self.bridges.values(): await bridge.connections.close()
-        for listeners in self.carriers.values():
-            for server in listeners:
-                server.close(); await server.wait_closed()
+        listeners = [server for servers in self.carriers.values() for server in servers]
+        for server in listeners: server.close()
         for task in list(self.channels): task.cancel()
         await asyncio.gather(*list(self.channels), return_exceptions=True)
+        await asyncio.gather(*(server.wait_closed() for server in listeners))
         await test_core.CoreIntegrationTests.asyncTearDown(self)
 
     async def connect(self, origin='alpha', retry=False):
@@ -153,6 +173,46 @@ class ConnectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(b.connection_activity('alpha'))
         self.assertIsNotNone(b.store.get('task_delivery_acks', rid))
 
+    async def test_old_commit_cleanup_never_kills_new_candidate_before_prepare(self):
+        chosen = await self.connect('alpha')
+        a, b = self.bridges['alpha'], self.bridges['beta']
+        await a.connections._close_owner('beta', chosen['decision']['connection_id'])
+        # Linux reports the known-dead listener immediately. Simulate that
+        # evidence on every OS to expose the old +0.5s cleanup timer reliably.
+        for manager in (a.connections, b.connections):
+            original_health = manager._healthy
+            async def health(peer, decision, original_health=original_health):
+                if decision and decision['generation'] == chosen['generation']:
+                    return False
+                return await original_health(peer, decision)
+            manager._healthy = health
+        entered, release = asyncio.Event(), asyncio.Event()
+        original_select = b.connections._select
+        async def hold_before_prepare(peer, candidate):
+            entered.set(); await release.wait()
+            return await original_select(peer, candidate)
+        b.connections._select = hold_before_prepare
+        # Authorize cleanup before the new candidate exists, then hold the
+        # new proposal at the old generation until that timer has fired.
+        b.connections._defer_cleanup('alpha', chosen['generation'], chosen['decision']['connection_id'])
+        pending = asyncio.create_task(self.connect('beta', retry=True))
+        try:
+            await asyncio.wait_for(entered.wait(), 10)
+            # Replaying the old commit across this candidate must also not
+            # authorize a fresh sweep that includes this new SSH carrier.
+            await b.connections._receive_commit('alpha', {'decision': chosen['decision']})
+            await asyncio.sleep(.65)
+            self.assertTrue(any(origin == 'beta' for origin, _ in self.carriers),
+                            'An old commit timer killed a later candidate before preparation')
+        finally:
+            release.set()
+        new = await pending
+        self.assertEqual(new['generation'], chosen['generation'] + 1)
+        # Successful commit must leave a usable carrier for subsequent HTTP,
+        # not merely deliver the response over a channel that is already open.
+        status = await a.remote('beta', 'peer.status', {})
+        self.assertEqual(status['peer_id'], 'beta')
+
     async def test_waiting_status_and_pending_delivery_never_launch(self):
         for bridge in self.bridges.values():
             for _ in range(3):
@@ -217,3 +277,16 @@ class ConnectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         local = await self.bridges['beta'].op_local_status({})
         self.assertTrue(local['ready'])
         self.assertFalse(local['codex']['ready'])
+
+    async def test_carrier_lost_after_selection_is_not_reported_as_codex_failure(self):
+        a = self.bridges['alpha']; original = a.remote
+        async def lost_probe(peer, method, params):
+            if peer == 'beta' and method == 'peer.status':
+                raise BridgeError('peer_unavailable', 'Carrier disappeared after selection', True)
+            return await original(peer, method, params)
+        a.remote = lost_probe
+        result = await a.op_connection_ensure({'peer_id': 'beta', 'request_id': request_id()})
+        self.assertFalse(result['available'])
+        self.assertEqual(result['stages']['remote_bridge']['state'], 'fail')
+        self.assertEqual(result['stages']['remote_codex']['state'], 'not_checked')
+        self.assertEqual(result['error']['code'], 'peer_unavailable')

@@ -29,7 +29,7 @@ class Pair:
                 'peers': {peer: {'enabled': True, 'incoming_token': peer + '-secret',
                                 'outgoing_token': own + '-secret', 'url': 'http://127.0.0.1:48001'}},
                 'connections': {peer: {'lanes': copy.deepcopy(lanes), 'initial_attempts': 1,
-                    'initial_seconds': 2, 'recovery_attempts': 1, 'recovery_seconds': 2, 'idle_seconds': 1}}}
+                    'initial_seconds': 10, 'recovery_attempts': 1, 'recovery_seconds': 10, 'idle_seconds': 1}}}
             node.config = lambda node=node: node.cfg
             def lookup(peer, node=node):
                 item = node.cfg['peers'][peer]
@@ -359,7 +359,9 @@ class ConnectionsTest(unittest.IsolatedAsyncioTestCase):
         state['episode'].update(kind='recovery', state='healthy', attempts=1)
         self.p.a._save(state)
         self.p.a.recovery['bravo'] = request()
-        self.p.a.healthy_since['bravo'] = time.monotonic()-301
+        # Monotonic epochs are arbitrary: exercise a negative backdated value
+        # on Windows as well as on short-lived Linux/macOS CI runners.
+        self.p.a.healthy_since['bravo'] = min(-10, time.monotonic()-301)
         self.p.a.last_progress.clear()
         await self.p.a.maintenance()
         self.assertEqual(self.p.a._state('bravo')['episode']['attempts'], 1)
@@ -380,6 +382,16 @@ class ConnectionsTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('bravo', self.p.a.last_progress)
         async with self.p.a.route('bravo', activity=True): pass
         self.assertIn('bravo', self.p.a.last_progress)
+
+    async def test_failed_bridge_probe_clears_availability_separately_from_codex(self):
+        await self.p.a.ensure('bravo', request())
+        self.p.a.record_codex('bravo', {'ready': True})
+        self.p.a.record_probe_failure('bravo', BridgeError('peer_unavailable', 'Carrier disappeared', True))
+        result = self.p.a.status('bravo')
+        self.assertFalse(result['available'])
+        self.assertEqual(result['stages']['remote_bridge']['state'], 'fail')
+        self.assertEqual(result['stages']['remote_codex']['state'], 'not_checked')
+        self.assertEqual(result['stages']['forwarding']['state'], 'stale')
 
 
 if __name__ == '__main__': unittest.main()

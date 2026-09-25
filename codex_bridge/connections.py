@@ -111,6 +111,7 @@ class ConnectionManager:
         self.locks = {}
         self.demands = {}
         self.owners = {}
+        self.local_candidates = {}
         self.verified = {}
         self.challenges = {}
         self.proposals = {}
@@ -230,12 +231,38 @@ class ConnectionManager:
         """A substantive RPC/result was acknowledged, not merely polled."""
         self.last_progress[peer] = time.monotonic()
 
+    def record_probe_failure(self, peer, error):
+        """A failed authenticated Bridge probe is not a Codex runtime failure."""
+        detail = error.as_dict() if isinstance(error, BridgeError) else error
+        if not isinstance(detail, dict):
+            detail = {'code': 'peer_unavailable', 'message': 'Peer Bridge could not be verified', 'retryable': True}
+        if not self.configured(peer):
+            self.legacy_status[peer] = {'peer_id': peer, 'legacy': True, 'available': False,
+                'state': 'disconnected', 'error': detail, 'updated_at': now()}
+            return
+        state = self._state(peer)
+        if state.get('decision'): state['decision']['dispatch_ready'] = False
+        state['state'] = 'disconnected'; state['error'] = copy.deepcopy(detail)
+        state['stages']['remote_bridge'] = {'state': 'fail', 'evidence_at': now(), 'code': detail.get('code')}
+        if detail.get('code') in ('peer_unavailable', 'connection_timeout'):
+            for stage in ('network_ssh', 'ssh_authentication', 'forwarding'):
+                if state['stages'][stage]['state'] == 'pass':
+                    state['stages'][stage].update(state='stale', evidence_at=now())
+        state['stages']['remote_codex'] = {'state': 'not_checked', 'evidence_at': None, 'code': None}
+        self._save(state)
+
     def _defer_cleanup(self, peer, generation, winner):
+        # A delayed old commit/close must not sweep up a candidate created
+        # afterwards while the *same* generation still awaits replacement.
+        # Capture exact owned attempts at authorization, never future children.
+        attempts = set(self.local_candidates.get(peer, ())) - {winner}
         async def cleanup():
             if self.closed: return
             decision = self._state(peer).get('decision') or {}
             if decision.get('generation') == generation:
-                await self._close_losers(peer, winner)
+                for attempt in attempts:
+                    await self._close_owner(peer, attempt)
+                    self.local_candidates.get(peer, set()).discard(attempt)
         def schedule():
             self.cleanup_handles.discard(handle)
             if self.closed: return
@@ -499,11 +526,13 @@ class ConnectionManager:
                     or existing['generation'] != proposed['generation']
                     or existing['connection_id'] != proposed['connection_id']):
                 raise BridgeError('decision_unresolved', 'No matching prepared decision can be committed')
+            newly_committed = existing['state'] == 'prepared'
             existing.update(state='committed', dispatch_ready=True, committed_at=now())
             state['state'] = 'connected'; state.pop('peer_paused', None); self._save(state)
         self.last_activity.setdefault(peer, time.monotonic())
         # Defer loser closure until the commit response has travelled back.
-        self._defer_cleanup(peer, proposed['generation'], proposed['candidate']['attempt_id'])
+        if newly_committed:
+            self._defer_cleanup(peer, proposed['generation'], proposed['candidate']['attempt_id'])
         return {'committed': True, 'connection_id': existing['connection_id'], 'generation': existing['generation']}
 
     async def _receive_abort(self, peer, p):
@@ -662,6 +691,7 @@ class ConnectionManager:
             episode['attempts'] += 1
             state = self._state(peer); state['episode'] = episode; self._save(state)  # Charge before any spawn.
             candidate = self._candidate(peer)
+            self.local_candidates.setdefault(peer, set()).add(candidate['attempt_id'])
             try:
                 await asyncio.wait_for(self._open_candidate(peer, candidate), max(.01, deadline-time.monotonic()))
                 await asyncio.wait_for(self._select(peer, candidate), max(.01, deadline-time.monotonic()))
@@ -748,6 +778,7 @@ class ConnectionManager:
         raise BridgeError('ssh_endpoint_unreachable', 'SSH did not authenticate within its bounded timeout', True)
 
     async def _close_owner(self, peer, attempt):
+        self.local_candidates.get(peer, set()).discard(attempt)
         item = self.owners.pop((peer, attempt), None)
         if item:
             owner, errors = item
@@ -938,7 +969,8 @@ class ConnectionManager:
                     await self._idle_close(peer, decision)
                 health_began = self.healthy_since.get(peer, time.monotonic())
                 healthy_with_progress = (time.monotonic()-health_began >= 300
-                                         and self.last_progress.get(peer, -1) >= health_began)
+                                         and peer in self.last_progress
+                                         and self.last_progress[peer] >= health_began)
                 if peer in self.recovery and (not self._activity(peer) or healthy_with_progress):
                     self.recovery.pop(peer, None)
                     state = self._state(peer)

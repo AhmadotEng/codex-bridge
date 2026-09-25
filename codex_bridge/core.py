@@ -334,7 +334,7 @@ class Bridge:
                     raise BridgeError('peer_mismatch', 'The remote Bridge has a different peer identity')
                 self.connections.record_codex(peer_id, result=status)
             except BridgeError as exc:
-                self.connections.record_codex(peer_id, error=exc.as_dict())
+                self.connections.record_probe_failure(peer_id, exc)
             return self.connections.status(peer_id)
         return result
 
