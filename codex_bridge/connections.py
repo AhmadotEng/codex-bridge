@@ -32,7 +32,7 @@ STAGES = ('local_bridge', 'network_ssh', 'ssh_authentication', 'forwarding',
 HARD_ERRORS = {'ssh_host_key_failed', 'ssh_authentication_failed', 'forwarding_port_in_use',
                'forwarding_denied', 'unauthorized', 'scope_denied', 'access_revoked', 'peer_mismatch',
                'configuration', 'peer_stopped', 'connection_stopped', 'protocol_error',
-               'capability_missing', 'decision_unresolved', 'bridge_unavailable'}
+               'capability_missing', 'decision_unresolved', 'bridge_unavailable', 'ssh_cleanup_unconfirmed'}
 
 # Configure parent-death cleanup in a fresh interpreter, avoiding preexec_fn in
 # this multithreaded HTTP daemon. The child checks the spawning parent's PID
@@ -111,6 +111,8 @@ class ConnectionManager:
         self.locks = {}
         self.demands = {}
         self.owners = {}
+        self.owner_closures = {}
+        self.cleanup_failures = set()
         self.local_candidates = {}
         self.verified = {}
         self.challenges = {}
@@ -153,6 +155,19 @@ class ConnectionManager:
 
     def _lock(self, peer):
         return self.locks.setdefault(peer, asyncio.Lock())
+
+    def _cleanup_pending(self, peer):
+        attempts = {attempt for owner_peer, attempt in self.cleanup_failures if owner_peer == peer}
+        attempts.update(attempt for (owner_peer, attempt), task in self.owner_closures.items()
+                        if owner_peer == peer and not task.done())
+        attempts.update(item['attempt_id'] for item in self.bridge.store.all('connection_children')
+                        if item.get('peer_id') == peer and not item.get('closed') and item.get('close_error'))
+        return sorted(attempts)
+
+    def _require_clean(self, peer):
+        if self._cleanup_pending(peer):
+            raise BridgeError('ssh_cleanup_unconfirmed',
+                'An owned SSH child has not confirmed exit; retry local disconnect before connecting again', True)
 
     def _state(self, peer):
         state = self.bridge.store.get('connections', peer) or {
@@ -267,7 +282,12 @@ class ConnectionManager:
             self.cleanup_handles.discard(handle)
             if self.closed: return
             task = asyncio.create_task(cleanup()); self.cleanup_tasks.add(task)
-            task.add_done_callback(self.cleanup_tasks.discard)
+            def completed(value):
+                self.cleanup_tasks.discard(value)
+                # Failure is retained on the child journal/status. Consume the
+                # background exception without retiring its owned handle.
+                if not value.cancelled(): value.exception()
+            task.add_done_callback(completed)
         handle = asyncio.get_running_loop().call_later(.5, schedule)
         self.cleanup_handles.add(handle)
 
@@ -400,6 +420,7 @@ class ConnectionManager:
         return await self._rpc(peer, 'propose', {'candidate': candidate}, candidate, timeout=20)
 
     async def _receive_propose(self, peer, p):
+        self._require_clean(peer)
         if self._coordinator(peer) != self.bridge.node_id:
             raise BridgeError('protocol_error', 'Only the immutable-ID coordinator selects a connection')
         candidate = p['candidate']; self._verified(peer, candidate)
@@ -492,6 +513,7 @@ class ConnectionManager:
         return self._state(peer)['decision']
 
     async def _receive_prepare(self, peer, p):
+        self._require_clean(peer)
         if self._coordinator(peer) != peer:
             raise BridgeError('protocol_error', 'Prepare must come from the pairing coordinator')
         decision = self._validate_decision(peer, p.get('decision')); self._verified(peer, decision['candidate'])
@@ -616,6 +638,7 @@ class ConnectionManager:
             self.legacy_status[peer] = result
             return result
         self._settings(peer)
+        self._require_clean(peer)
         async with self._lock(peer):
             previous = self.bridge.store.get('connection_requests', peer + ':' + request_id)
             if previous and previous.get('finished'):
@@ -650,6 +673,7 @@ class ConnectionManager:
         return result
 
     async def _demand(self, peer, request_id, recovery=False):
+        self._require_clean(peer)
         began = time.monotonic()
         draining = self.drains.get(peer)
         if draining:
@@ -703,6 +727,25 @@ class ConnectionManager:
                 await self._close_owner(peer, candidate['attempt_id']); raise
             except (BridgeError, OSError, asyncio.TimeoutError) as exc:
                 error = exc if isinstance(exc, BridgeError) else BridgeError('connection_timeout', 'Connection verification exceeded its bounded deadline', True)
+                if error.code == 'ssh_cleanup_unconfirmed':
+                    # A remote refusal or concurrent local close can occur
+                    # before selection. Retain only a candidate owning the
+                    # durable prepared/committed decision, not an orphan lane.
+                    selected = self._state(peer).get('decision') or {}
+                    if (selected.get('connection_id') != candidate['attempt_id'] or
+                            selected.get('state') not in ('prepared', 'committed')):
+                        try:
+                            await self._close_owner(peer, candidate['attempt_id'])
+                        except BridgeError as cleanup:
+                            if cleanup.code != 'ssh_cleanup_unconfirmed': raise
+                            error = cleanup  # Exact ownership remains retained.
+                    # A failed loser close preserves the selected winner and
+                    # never buys another SSH attempt on an occupied lane.
+                    state = self._state(peer); state['episode']['state'] = 'failed'
+                    if not selected or selected.get('state') not in ('prepared', 'committed'):
+                        state['state'] = 'failed'
+                    state['error'] = error.as_dict(); self._save(state)
+                    return self.status(peer)
                 stage = ('network_ssh' if error.code == 'ssh_endpoint_unreachable' else
                          'ssh_authentication' if error.code in ('ssh_authentication_failed', 'ssh_host_key_failed') else
                          'forwarding' if error.code.startswith('forwarding') else 'remote_bridge')
@@ -778,20 +821,59 @@ class ConnectionManager:
         raise BridgeError('ssh_endpoint_unreachable', 'SSH did not authenticate within its bounded timeout', True)
 
     async def _close_owner(self, peer, attempt):
-        self.local_candidates.get(peer, set()).discard(attempt)
-        item = self.owners.pop((peer, attempt), None)
+        key = (peer, attempt)
+        task = self.owner_closures.get(key)
+        if task is None or task.done():
+            task = asyncio.create_task(self._finish_owner_close(peer, attempt))
+            self.owner_closures[key] = task
+            # Caller cancellation does not interrupt the bounded exact-owner
+            # close. A later disconnect joins it, rather than closing twice.
+            def finished(value):
+                if self.owner_closures.get(key) is value:
+                    self.owner_closures.pop(key, None)
+                if not value.cancelled(): value.exception()
+            task.add_done_callback(finished)
+        await asyncio.shield(task)
+
+    async def _finish_owner_close(self, peer, attempt):
+        key = (peer, attempt)
+        item = self.owners.get(key)
         if item:
             owner, errors = item
-            await asyncio.to_thread(owner.close)
-            await asyncio.to_thread(errors.finish)
-            record = self.bridge.store.get('connection_children', attempt)
-            if record:
-                record.update(closed=True, closed_at=now()); self.bridge.store.put('connection_children', attempt, record)
+            try:
+                await asyncio.to_thread(owner.close)
+                # Popen's retained Windows handle / POSIX waitable child stays
+                # exact across PID reuse and the Linux wrapper's exec(ssh).
+                if owner.process.poll() is None:
+                    raise subprocess.TimeoutExpired(['owned-ssh'], 5)
+                await asyncio.to_thread(errors.finish)
+                record = self.bridge.store.get('connection_children', attempt)
+                if record:
+                    record.update(closed=True, closed_at=now()); record.pop('close_error', None)
+                    self.bridge.store.put('connection_children', attempt, record)
+            except Exception as exc:
+                self.cleanup_failures.add(key)
+                error = BridgeError('ssh_cleanup_unconfirmed',
+                    'Owned SSH child cleanup is unconfirmed; its exact handle is retained for local disconnect retry', True)
+                record = self.bridge.store.get('connection_children', attempt)
+                if record:
+                    record.update(closed=False, close_error=error.as_dict(), close_attempted_at=now())
+                    self.bridge.store.put('connection_children', attempt, record)
+                raise error from exc
+            self.owners.pop(key, None)
+            self.cleanup_failures.discard(key)
+        self.local_candidates.get(peer, set()).discard(attempt)
 
     async def _close_losers(self, peer, winner):
+        failure = None
         for p, attempt in list(self.owners):
             if p == peer and attempt != winner:
-                await self._close_owner(peer, attempt)
+                try:
+                    await self._close_owner(peer, attempt)
+                except BridgeError as exc:
+                    failure = failure or exc
+        if failure: raise failure
+        self._require_clean(peer)
 
     def status(self, peer_id=None):
         if peer_id is None:
@@ -801,9 +883,12 @@ class ConnectionManager:
             return self.legacy_status.get(peer_id) or {'peer_id': peer_id, 'state': 'legacy', 'legacy': True,
                     'available': False, 'message': 'Not connected; remote Bridge not checked.'}
         state = self._state(peer_id); decision = state.get('decision')
+        pending_cleanup = self._cleanup_pending(peer_id)
         mapping_current = not decision or decision['candidate']['map_digest'] == digest(
             self.bridge.config().get('connections', {}).get(peer_id, {}).get('lanes'))
-        if state['stop_requested']:
+        if pending_cleanup:
+            message = 'Owned SSH child cleanup is unconfirmed; retry local disconnect before connecting again.'
+        elif state['stop_requested']:
             message = 'Connection deliberately stopped; resume requires an explicit local retry.'
         elif (state.get('error') or {}).get('code') == 'bridge_unavailable':
             message = 'SSH connected; remote Bridge unavailable at the configured port.'
@@ -818,12 +903,25 @@ class ConnectionManager:
         else:
             message = state.get('error', {}).get('message', 'Connection verification is incomplete.') if state.get('error') else 'Connection verification is incomplete.'
         return {**copy.deepcopy(state), 'message': message, 'available': bool(decision and
-            decision.get('state') == 'committed' and decision.get('dispatch_ready') and not state['stop_requested'] and mapping_current),
+            decision.get('state') == 'committed' and decision.get('dispatch_ready') and not state['stop_requested'] and mapping_current and not pending_cleanup),
+            'cleanup_pending': pending_cleanup,
             'remaining_seconds': round(max(0, self.deadlines.get(peer_id, 0)-time.monotonic()), 2),
             'active_operations': self.inflight.get(peer_id, 0)}
 
     async def disconnect(self, peer, request_id):
-        _uuid(request_id); self._settings(peer)
+        _uuid(request_id); identifier(peer)
+        cfg = self.bridge.config()
+        paired = cfg.get('peers', {}).get(peer)
+        revoked = bool(paired is not None and not paired.get('enabled', False))
+        if revoked:
+            # This operation is owner-local. Revocation must not prevent it
+            # from closing this daemon's exact retained children. It neither
+            # re-enables credentials nor authenticates/sends any remote RPC.
+            settings = validate_connections(cfg).get(peer)
+            if not settings or settings.get('mode', 'on_demand') != 'on_demand':
+                raise BridgeError('legacy_connection', 'This peer uses its existing legacy route')
+        else:
+            self._settings(peer)
         old = self.bridge.store.get('connection_disconnects', peer + ':' + request_id)
         if old: return old
         async with self._lock(peer):
@@ -831,7 +929,7 @@ class ConnectionManager:
             if self._activity(peer):
                 raise BridgeError('connection_busy', 'Active tasks, transfers, or pending results must finish or be cancelled before disconnect', True)
             confirmed = False
-            if decision:
+            if decision and not revoked:
                 try:
                     await self._rpc(peer, 'disconnect', {'connection_id': decision['connection_id'],
                         'generation': decision['generation']}, decision['candidate'], timeout=3)
@@ -839,14 +937,14 @@ class ConnectionManager:
                 except BridgeError as exc:
                     if exc.code == 'connection_busy': raise
                 except (OSError, asyncio.TimeoutError): pass
-            state.update(stop_requested=True, state='stopped')
+            state.update(stop_requested=True, state='revoked' if revoked else 'stopped')
             if state.get('decision'): state['decision'].update(state='closed', dispatch_ready=False)
             self._save(state)
         task = self.demands.get(peer)
         if task and not task.done(): task.cancel()
         await self._close_losers(peer, None)
         result = {'peer_id': peer, 'request_id': request_id, 'stop_requested': True,
-                  'remote_closure_confirmed': confirmed, 'updated_at': now()}
+                  'remote_closure_confirmed': confirmed, 'local_only': revoked, 'updated_at': now()}
         self.bridge.store.put('connection_disconnects', peer + ':' + request_id, result)
         return result
 
@@ -952,12 +1050,27 @@ class ConnectionManager:
             if not self.bridge.config().get('peers', {}).get(peer, {}).get('enabled'):
                 task = self.demands.get(peer)
                 if task and not task.done(): task.cancel()
-                await self._close_losers(peer, None)
+                pending = set(self._cleanup_pending(peer))
+                if pending:
+                    # Do not repeatedly retry failed cleanup, but revocation
+                    # still closes other retained children (including a winner).
+                    for owner_peer, attempt in list(self.owners):
+                        if owner_peer != peer or attempt in pending: continue
+                        try:
+                            await self._close_owner(peer, attempt)
+                        except BridgeError as exc:
+                            if exc.code != 'ssh_cleanup_unconfirmed': raise
+                else:
+                    try:
+                        await self._close_losers(peer, None)
+                    except BridgeError as exc:
+                        if exc.code != 'ssh_cleanup_unconfirmed': raise
                 state = self._state(peer); state['state'] = 'revoked'
                 if state.get('decision'): state['decision']['dispatch_ready'] = False
                 state['error'] = {'code': 'access_revoked', 'message': 'This peer authorization was revoked', 'retryable': False}
                 self._save(state)
                 continue
+            if self._cleanup_pending(peer): continue
             state = self._state(peer); decision = state.get('decision')
             if state['stop_requested'] or state.get('peer_paused'): continue
             if not decision or decision.get('state') != 'committed' or not decision.get('dispatch_ready'): continue
@@ -1000,4 +1113,12 @@ class ConnectionManager:
         for task in tasks:
             if not task.done(): task.cancel()
         if tasks: await asyncio.gather(*tasks, return_exceptions=True)
-        for peer, attempt in list(self.owners): await self._close_owner(peer, attempt)
+        failure = None
+        for peer, attempt in list(self.owners):
+            try:
+                await self._close_owner(peer, attempt)
+            except Exception as exc:
+                # A single unconfirmed exit cannot skip shutdown of other
+                # exact retained children, including children of other peers.
+                failure = failure or exc
+        if failure: raise failure

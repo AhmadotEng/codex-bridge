@@ -20,6 +20,8 @@ Windows normally reads server settings from `%ProgramData%\ssh\sshd_config`. Sta
 
 Validate the candidate configuration with the selected `sshd.exe -t` before a coordinated service restart. A successful client `ssh.exe` on Windows does not mean its receiving service exists.
 
+Keep a receiving service's runtime in a machine installation directory, separate from an owner's private profile and Bridge configuration. In deployment testing, a receiver launched from a protected user-profile directory accepted the SSH banner but its authentication child failed to load dependencies. Moving the dedicated, verified runtime to a machine directory with the required service-child read/execute access resolved it. Do not widen access to the owner's profile, private keys, or configuration to repair this symptom. Validate actual authentication and both allowed forwards after any runtime or ACL change; a running service alone cannot prove the repair.
+
 ## Linux receiver
 
 Install the distribution's OpenSSH server only if needed. Use that distribution's service name (commonly `sshd` or `ssh`); inspect the active configuration and firewall before a targeted change. Configure it as an OS receiving service independently of the owner's Bridge systemd user unit. Authorize the other public key with owner-only `.ssh` directory/key-file permissions. Validate `sshd -t` before a coordinated reload/restart; retain a local recovery terminal.

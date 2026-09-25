@@ -72,6 +72,8 @@ An explicit disconnect also rejects incoming candidate commitment until the loca
 
 Disconnect refuses while either endpoint reports active tasks, transfers, or pending results. Finish or cancel that work and collect its result, then retry the disconnect with the same ID. A refused busy request does not claim that the connection stopped.
 
+If shutdown cannot confirm that an owned SSH child exited, status reports `ssh_cleanup_unconfirmed` and lists its attempt in `cleanup_pending`. Bridge retains the exact process handle and does not start another candidate on that lane. Retry the local disconnect with the same request ID after the problem is resolved; a failed cleanup is not recorded as a successful disconnect. If the daemon has since restarted and lost that handle, stop and inspect the recorded ownership locally. A saved PID alone is never permission to terminate a process or declare its forwarding ports released.
+
 Idle closure requires both endpoints to agree that no project has active or blocked tasks, transfers, pending messages/cancellation acknowledgments, or undelivered results. Status polling and heartbeats are not activity. Work reserved during drain cancels closure; accepted work, sessions, request IDs, results, and transfer progress survive reconnection. An unknown execution outcome is `uncertain`, not permission to replay side effects.
 
 ## Read the stages

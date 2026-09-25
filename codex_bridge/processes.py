@@ -243,8 +243,10 @@ class OwnedProcess:
                 else:
                     import signal
                     os.killpg(self.process.pid, signal.SIGKILL)
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                self.process.wait(timeout=5)
+            # Termination is asynchronous. Keep the exact Popen handle and
+            # propagate an unconfirmed exit so callers cannot retire ownership
+            # or report a released forwarding port while this child survives.
+            self.process.wait(timeout=5)
 
     def __enter__(self):
         return self.process

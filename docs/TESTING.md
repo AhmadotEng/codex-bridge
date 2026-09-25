@@ -1,5 +1,22 @@
 # Verification
 
+## 0.3.2-rc.5 cleanup correction and receiver evidence
+
+rc.5 keeps exact SSH process ownership until exit and cleanup journaling succeed. An unconfirmed close reports `ssh_cleanup_unconfirmed`, retains its child for an explicit local disconnect retry, and blocks competing dialing. Caller cancellation does not abandon cleanup. A failed duplicate close preserves the selected route, while rejected unselected candidates are cleaned up. Revocation cannot authorize a remote call or prevent local cleanup of the retained owned process. A restarted daemon does not adopt a saved PID as a new process handle.
+
+Windows/Python 3.11 verification passed **409 tests: 401 passed and eight platform skips**, in 131.172 seconds. The 21 new cleanup regressions also passed independent review, including both reproduced candidate-retention and revoked-peer retry failures. Plugin manifest validation passed. Linux/package and live rc.5 acceptance remain pending.
+
+The following receiver checks were performed separately on the existing rc.4 deployments on September 25, 2026; they do not establish rc.5 managed-connection acceptance.
+
+| Receiver check | Observed result |
+| --- | --- |
+| Linux initiates to Windows | Public-key and pinned-host authentication passed. Both allowed forwarding directions carried authenticated Bridge status calls identifying the expected peer. |
+| Windows receiving restrictions | Authenticated shell, SFTP, an unapproved local-forward destination and an unapproved reverse listener were rejected. Five test SSH children exited; temporary listeners were verified absent. |
+| Windows runtime repair | A dedicated machine runtime fixed an authentication-child dependency-loading failure. Existing host keys, peer-restricted firewall, Bridge source/configuration and legacy carrier remained intact. |
+| Linux receiving policy | A narrowly matched receiver policy and one public-key line gained the new candidate listener while preserving the existing listener. Both fixture runs passed 23 tests and all 40 native checks succeeded. One reload retained the SSH service process and working sessions. |
+
+The Windows receiver remains manually started during acceptance. Agent-forwarding denial is supported by its effective policy, not a separate live channel test. Actual owner sign-in/reboot, managed either-origin and simultaneous initiation, and the full recovery/cancellation/revocation matrix remain pending.
+
 ## 0.3.2-rc.4 startup and live-upgrade evidence
 
 The live rc.3 rollout revealed that Windows took about 2.05 seconds to report an explicitly refused loopback connection, exceeding the startup probe's two-second limit. Independent isolated probes reproduced a timeout at two seconds and WinError 10061 after approximately 2.03–2.05 seconds when given more time. The previous live code and exact configuration were restored; all 662 pre-window records, saved artifacts, startup registration and the existing SSH carrier were preserved.

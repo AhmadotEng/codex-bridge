@@ -21,7 +21,7 @@ SOURCE_EXTRA = (
     'tests/test_connection_entrypoints.py', 'tests/test_connection_integration.py',
     'tests/test_execution_policy.py',
     'tests/test_install.py', 'tests/test_install_posix.py', 'tests/test_local_actions.py',
-    'tests/test_mcp.py', 'tests/test_onboarding.py', 'tests/test_onefile.py',
+    'tests/test_mcp.py', 'tests/test_onboarding.py', 'tests/test_onefile.py', 'tests/test_owned_close.py',
     'tests/test_release.py', 'tests/test_runtime_platform.py', 'tests/test_runtime_readiness.py',
     'tests/test_setup_portable.py', 'tests/test_ssh_options.py', 'tests/test_transport.py',
     'tests/test_turn_ownership.py', 'tests/test_windows_file_io.py',
