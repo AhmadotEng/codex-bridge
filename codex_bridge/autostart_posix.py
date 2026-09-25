@@ -11,6 +11,7 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -127,6 +128,54 @@ def _inspect(name):
     return info
 
 
+_VENDOR_TIMEOUT_POLICY = '/usr/lib/systemd/user/service.d/10-timeout-abort.conf'
+
+
+def _reviewed_dropins(value):
+    """Recognize the inspected Fedora type-wide stop-timeout policy only.
+
+    A service.d drop-in is inherited by every service, but that alone does not
+    make it safe: it can also replace commands or restart policy. Never trust a
+    directory, filename, or root ownership without checking the contents too.
+    Unknown policies and all owner/name-specific overrides remain conflicts.
+    """
+    if not value:
+        return True
+    # Compare the full property before parsing: additional paths, escaped paths,
+    # aliases and per-unit copies must not acquire this exception.
+    if value != _VENDOR_TIMEOUT_POLICY:
+        return False
+    selected = Path(value)
+    try:
+        for component in (*reversed(selected.parents), selected):
+            info = component.lstat()
+            expected = stat.S_ISREG if component == selected else stat.S_ISDIR
+            if not expected(info.st_mode) or info.st_uid != 0 or info.st_gid != 0 or info.st_mode & 0o022:
+                return False
+        # Parent directories and file are not replaceable by an ordinary owner.
+        # Still check the opened inode and bound the read to reject replacement,
+        # special files, and unexpectedly large policy files conservatively.
+        with selected.open('rb') as stream:
+            opened = os.fstat(stream.fileno())
+            if (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid, opened.st_gid) != (
+                    info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid):
+                return False
+            raw = stream.read(16385)
+        if len(raw) > 16384:
+            return False
+        text = raw.decode('utf-8')
+        if any(ord(c) < 32 and c not in '\n\r\t' or ord(c) == 127 for c in text):
+            return False
+        lines = [line.strip(' \t\r') for line in text.split('\n')]
+        # Do not implement systemd's continuation syntax in this narrow parser.
+        if any(line.endswith('\\') for line in lines):
+            return False
+        settings = [line for line in lines if line and not line.startswith(('#', ';'))]
+        return settings == ['[Service]', 'TimeoutStopFailureMode=abort']
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+
 def _check_owned(path, component, peer_id, data):
     common = _common()
     entry = _entry(path, component, peer_id)
@@ -142,7 +191,7 @@ def _check_owned(path, component, peer_id, data):
             raise BridgeError('startup_ownership_conflict', 'The selected user unit differs from the saved Bridge registration; it was preserved.')
     info = _inspect(entry['unit_name'])
     fragment = info.get('FragmentPath')
-    if (fragment and Path(fragment).resolve() != selected.resolve()) or info.get('DropInPaths'):
+    if (fragment and Path(fragment).resolve() != selected.resolve()) or not _reviewed_dropins(info.get('DropInPaths')):
         raise BridgeError('startup_ownership_conflict', 'Another user-unit path or override controls this name; inspect it before changing startup.')
     return entry, selected, raw, info
 

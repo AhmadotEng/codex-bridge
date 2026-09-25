@@ -4,10 +4,12 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from codex_bridge import autostart, autostart_posix as units, cli
@@ -68,6 +70,39 @@ class UserUnitTests(unittest.TestCase):
 
     def unit(self, component='daemon', peer=None):
         return self.directory / units.unit_name(self.path, component, peer)
+
+    def vendor_policy(self, text='# Distribution service policy\n\n[Service]\nTimeoutStopFailureMode=abort\n'):
+        """Private filesystem fixture; simulate root metadata, never touch /usr."""
+        selected = self.root / 'vendor' / 'usr' / 'lib' / 'systemd' / 'user' / 'service.d' / '10-timeout-abort.conf'
+        selected.parent.mkdir(parents=True)
+        selected.write_text(text, encoding='utf-8')
+        components = set(selected.parents) | {selected}
+        original_lstat, original_fstat = Path.lstat, os.fstat
+        identity = original_lstat(selected)
+        self.policy_metadata = {}
+        self.policy_open_metadata = {}
+
+        def metadata(value, regular, changes=None):
+            fields = {name: getattr(value, name) for name in ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid')}
+            fields.update(st_uid=0, st_gid=0, st_mode=(stat.S_IFREG | 0o644) if regular else (stat.S_IFDIR | 0o755))
+            fields.update(changes or {})
+            return SimpleNamespace(**fields)
+
+        def lstat(path, *args, **kwargs):
+            value = original_lstat(path, *args, **kwargs)
+            return metadata(value, path == selected, self.policy_metadata.get(path)) if path in components else value
+
+        def fstat(fd):
+            value = original_fstat(fd)
+            if (value.st_dev, value.st_ino) == (identity.st_dev, identity.st_ino):
+                return metadata(value, True, self.policy_open_metadata)
+            return value
+
+        self.enterContext(mock.patch.object(units, '_VENDOR_TIMEOUT_POLICY', str(selected)))
+        self.enterContext(mock.patch.object(Path, 'lstat', lstat))
+        self.enterContext(mock.patch.object(os, 'fstat', fstat))
+        self.manager.overrides['DropInPaths'] = str(selected)
+        return selected
 
     def test_default_registers_only_waiting_owner_daemon_before_pairing(self):
         cfg = cli.read(self.path); cfg['peers'] = {}; cfg.pop('ssh_transports'); cli.save(self.path, cfg)
@@ -165,6 +200,139 @@ class UserUnitTests(unittest.TestCase):
         with self.assertRaises(BridgeError):
             autostart.disable(self.path, 'daemon', remove=True)
         self.assertEqual(self.unit().read_text(), 'edited unit')
+
+    def test_reviewed_vendor_policy_allows_owned_registration_status_start_and_removal(self):
+        policy = self.vendor_policy()
+        raw_policy = policy.read_bytes()
+        config = self.path.read_bytes()
+        autostart.enable(self.path)
+        name = units.unit_name(self.path, 'daemon')
+        row = autostart.status(self.path)['components'][0]
+        self.assertTrue(row['owned'])
+        self.assertTrue(row['enabled'])
+        self.assertEqual(row['state'], 'inactive')
+        self.assertNotIn('start', [call[0] for call in self.manager.calls])
+        self.assertEqual(autostart.start(self.path, 'daemon')['unit_name'], name)
+        self.assertIn(name, self.manager.active)
+        autostart.disable(self.path, 'daemon')
+        self.assertIn(name, self.manager.active)
+        self.assertNotIn('stop', [call[0] for call in self.manager.calls])
+        with self.assertRaises(BridgeError) as rejected:
+            autostart.disable(self.path, 'daemon', remove=True)
+        self.assertEqual(rejected.exception.code, 'component_running')
+        self.manager.active.remove(name)  # Owner's separate stop, outside registration.
+        autostart.disable(self.path, 'daemon', remove=True)
+        self.assertFalse(self.unit().exists())
+        self.assertEqual(policy.read_bytes(), raw_policy)
+        self.assertEqual(self.path.read_bytes(), config)
+
+    def test_reviewed_vendor_policy_preserves_explicit_stop_marker(self):
+        self.vendor_policy()
+        marker = autostart.stop_path(self.path, 'daemon')
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_bytes(b'owner deliberately stopped this daemon')
+        autostart.enable(self.path)
+        self.assertTrue(autostart.status(self.path)['components'][0]['stop_requested'])
+        autostart.disable(self.path, 'daemon', remove=True)
+        self.assertEqual(marker.read_bytes(), b'owner deliberately stopped this daemon')
+        self.assertFalse({'start', 'stop', 'restart'} & {call[0] for call in self.manager.calls})
+
+    def test_vendor_exception_is_exact_type_wide_path_not_other_overrides(self):
+        self.assertEqual(units._VENDOR_TIMEOUT_POLICY,
+                         '/usr/lib/systemd/user/service.d/10-timeout-abort.conf')
+        selected = self.vendor_policy()
+        autostart.enable(self.path)
+        owned_unit, saved = self.unit().read_bytes(), (self.state / 'autostart.json').read_bytes()
+        candidates = [str(selected) + ' /owner/override.conf', str(selected) + ' ' + str(selected),
+            '/etc/systemd/user/service.d/10-timeout-abort.conf',
+            '/usr/lib/systemd/user/' + self.unit().name + '.d/10-timeout-abort.conf',
+            '/usr/lib/systemd/user/codex-bridge-.service.d/10-timeout-abort.conf',
+            '/usr/lib/systemd/user/codex-bridge@.service.d/10-timeout-abort.conf',
+            str(self.directory / 'service.d' / '10-timeout-abort.conf'),
+            str(selected.parent / 'unreviewed.conf'), '"' + str(selected) + '"',
+            str(selected).replace('10-timeout', './10-timeout')]
+        for value in candidates:
+            with self.subTest(dropins=value):
+                self.manager.overrides['DropInPaths'] = value
+                for operation in (lambda: autostart.enable(self.path),
+                                  lambda: autostart.start(self.path, 'daemon'),
+                                  lambda: autostart.disable(self.path, 'daemon', remove=True)):
+                    with self.assertRaises(BridgeError) as rejected:
+                        operation()
+                    self.assertEqual(rejected.exception.code, 'startup_ownership_conflict')
+                self.assertFalse(autostart.status(self.path)['components'][0]['owned'])
+        self.assertEqual(self.unit().read_bytes(), owned_unit)
+        self.assertEqual((self.state / 'autostart.json').read_bytes(), saved)
+
+    def test_vendor_exception_rejects_unreviewed_content_or_missing_policy(self):
+        selected = self.vendor_policy()
+        valid = b'[Service]\nTimeoutStopFailureMode=abort\n'
+        cases = [b'', b'# only comments\n', valid + b'Restart=always\n',
+                 valid + b'ExecStart=\nExecStart=/bin/false\n', valid + b'Environment=EVIL=1\n',
+                 valid + b'[Install]\nWantedBy=other.target\n', valid + b'[Service]\n',
+                 valid.replace(b'abort', b'kill'), valid.replace(b'abort', b''),
+                 valid.replace(b'\nTimeout', b'\\\nTimeout'), b'# comment\\\n' + valid,
+                 valid + b'\x00', valid + b'\xff', b'#' * 16385 + b'\n' + valid]
+        for raw in cases:
+            with self.subTest(content=raw[:80]):
+                selected.write_bytes(raw)
+                self.assertFalse(units._reviewed_dropins(str(selected)))
+        selected.write_bytes(valid)
+        self.assertTrue(units._reviewed_dropins(str(selected)))
+        selected.unlink()
+        self.assertFalse(units._reviewed_dropins(str(selected)))
+
+    def test_vendor_exception_checks_every_path_component_and_opened_file(self):
+        selected = self.vendor_policy()
+        for component in (*selected.parents, selected):
+            changes = [{'st_uid': 1000}, {'st_gid': 1000}, {'st_mode': stat.S_IFLNK | 0o777},
+                       {'st_mode': (stat.S_IFREG if component == selected else stat.S_IFDIR) | 0o775},
+                       {'st_mode': (stat.S_IFREG if component == selected else stat.S_IFDIR) | 0o757},
+                       {'st_mode': stat.S_IFIFO | 0o644}]
+            for change in changes:
+                with self.subTest(component=str(component), change=change):
+                    self.policy_metadata[component] = change
+                    self.assertFalse(units._reviewed_dropins(str(selected)))
+                    self.policy_metadata.clear()
+        self.policy_open_metadata['st_ino'] = -1
+        self.assertFalse(units._reviewed_dropins(str(selected)))
+        self.policy_open_metadata.clear()
+        self.assertTrue(units._reviewed_dropins(str(selected)))
+
+    def test_vendor_policy_does_not_bypass_foreign_fragment_or_unit_hash(self):
+        self.vendor_policy()
+        autostart.enable(self.path)
+        original = self.unit().read_bytes()
+        self.manager.overrides['FragmentPath'] = str(self.root / 'foreign.service')
+        with self.assertRaises(BridgeError) as rejected:
+            autostart.start(self.path, 'daemon')
+        self.assertEqual(rejected.exception.code, 'startup_ownership_conflict')
+        del self.manager.overrides['FragmentPath']
+        self.unit().write_bytes(original + b'\n# owner edited\n')
+        with self.assertRaises(BridgeError) as rejected:
+            autostart.disable(self.path, 'daemon', remove=True)
+        self.assertEqual(rejected.exception.code, 'startup_ownership_conflict')
+        self.assertEqual(self.unit().read_bytes(), original + b'\n# owner edited\n')
+
+    def test_vendor_policy_keeps_active_upgrade_guard_and_exact_rollback(self):
+        old, settings = self.saved_quoted_directory_unit()
+        policy = self.vendor_policy()
+        policy_bytes = policy.read_bytes()
+        name = units.unit_name(self.path, 'daemon')
+        self.manager.active.add(name)
+        with self.assertRaises(BridgeError) as rejected:
+            autostart.enable(self.path)
+        self.assertEqual(rejected.exception.code, 'component_running')
+        self.manager.active.remove(name)
+        self.manager.fail_once = 'enable'
+        with self.assertRaises(BridgeError) as rejected:
+            autostart.enable(self.path)
+        self.assertEqual(rejected.exception.code, 'fixture_failure')
+        self.assertEqual(self.unit().read_bytes(), old)
+        self.assertEqual((self.state / 'autostart.json').read_bytes(), settings)
+        self.assertEqual(policy.read_bytes(), policy_bytes)
+        self.assertIn(name, self.manager.enabled)
+        self.assertFalse({'start', 'stop', 'restart'} & {call[0] for call in self.manager.calls})
 
     def test_failure_restores_preexisting_unit_and_enabled_state(self):
         autostart.enable(self.path)
