@@ -191,6 +191,11 @@ def _declares(node: Any, value: Any, root: dict) -> bool:
     choices = node.get("oneOf", node.get("anyOf"))
     if choices is not None:
         return any(accepts(part, value, root) and _declares(part, value, root) for part in choices)
+    if "allOf" in node:
+        # Native schemas wrap a referenced response type in allOf to attach a
+        # description. Acceptance must satisfy every conjunct; one must also
+        # explicitly declare the supplied fields rather than just allow them.
+        return accepts(node, value, root) and any(_declares(part, value, root) for part in node["allOf"])
     if isinstance(value, dict):
         props = node.get("properties", {})
         if not props and isinstance(node.get("additionalProperties"), (bool, dict)):
@@ -201,14 +206,14 @@ def _declares(node: Any, value: Any, root: dict) -> bool:
     return accepts(node, value, root)
 
 
-def _field(schema: dict, fields: str, example: Any) -> None:
+def _field(schema: dict, fields: str, example: Any, *, declared: bool = False) -> None:
     node = schema
     for field in fields.split("."):
         node = _resolve(node, schema)
         if field not in node.get("properties", {}):
             raise SchemaMismatch("Missing response field: " + fields)
         node = node["properties"][field]
-    if not accepts(node, example, schema):
+    if not accepts(node, example, schema) or (declared and not _declares(node, example, schema)):
         raise SchemaMismatch("Incompatible response field: " + fields)
 
 
@@ -230,7 +235,7 @@ def validate_schema_bundle(directory: str | Path, *, enable_local_actions: bool 
     common = {"cwd": workspace, "approvalPolicy": "never", "approvalsReviewer": "user",
               "sandbox": "read-only", "config": {}, "developerInstructions": "Scoped project task"}
     samples = {
-        "initialize": {"clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.3.2-rc.1"}, "capabilities": {"experimentalApi": enable_local_actions}},
+        "initialize": {"clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.3.2-rc.2"}, "capabilities": {"experimentalApi": enable_local_actions}},
         "thread/start": {**common, "ephemeral": False},
         "thread/resume": {**common, "threadId": "bridge-thread", "excludeTurns": True},
         "thread/name/set": {"threadId": "bridge-thread", "name": "Bridge: Example"},
@@ -281,15 +286,38 @@ def validate_schema_bundle(directory: str | Path, *, enable_local_actions: bool 
             _field(read("DynamicToolCallResponse"), "contentItems", [{"type": "inputText", "text": "Done"}])
     except (SchemaMismatch, KeyError, TypeError, ValueError) as exc:
         errors.append({"code": "schema_incompatible", "message": str(exc)[:240]})
+    # Full access is an optional owner-selected policy. Older runtimes can
+    # remain useful for restricted projects without implicitly accepting it.
+    full_access_errors = []
+    full_samples = {
+        method: {**samples[method], "sandbox": "danger-full-access"}
+        for method in ("thread/start", "thread/resume")
+    }
+    full_samples["turn/start"] = {**samples["turn/start"], "sandboxPolicy": {"type": "dangerFullAccess"}}
+    for method, params in full_samples.items():
+        try:
+            shape = _method(requests, method)
+            if not accepts(shape, params, requests) or not _declares(shape, params, requests):
+                raise SchemaMismatch("Full-access request policy is incompatible: " + method)
+        except (SchemaMismatch, KeyError, TypeError, ValueError) as exc:
+            full_access_errors.append({"code": "full_access_schema_incompatible", "message": str(exc)[:240]})
+    for name in ("v2/ThreadStartResponse", "v2/ThreadResumeResponse"):
+        try:
+            _field(read(name), "sandbox", {"type": "dangerFullAccess"}, declared=True)
+        except (SchemaMismatch, KeyError, TypeError, ValueError) as exc:
+            full_access_errors.append({"code": "full_access_schema_incompatible", "message": name + ": " + str(exc)[:180]})
     return {"ready": not errors, "compatibility": "schema-validated" if not errors else "incompatible",
             "schema_sha256": digest.hexdigest(), "checked_methods": list(samples),
-            "local_actions_checked": enable_local_actions, "errors": errors}
+            "local_actions_checked": enable_local_actions, "errors": errors,
+            "full_access_supported": not errors and not full_access_errors,
+            "full_access_errors": full_access_errors}
 
 
 def inspect_runtime(codex_path: str | Path, *, timeout: float = 30, enable_local_actions: bool = False) -> dict:
     """Return sanitized local compatibility status. Executable/config paths stay local."""
     result = {"ready": False, "schema_ready": False, "codex_version": None,
               "compatibility": "unavailable", "errors": [],
+              "full_access_supported": False, "full_access_errors": [],
               "runtime_bundle": inspect_runtime_bundle(codex_path, None),
               "native_tool_execution": "not_checked"}
     kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
@@ -340,4 +368,5 @@ def inspect_runtime(codex_path: str | Path, *, timeout: float = 30, enable_local
         message = str(exc) if isinstance(exc, SchemaMismatch) else "Codex executable or generated App Server schema could not be read"
         result["errors"].append({"code": "runtime_probe_failed", "message": message[:240]})
     result["ready"] = result["schema_ready"] and result["runtime_bundle"]["status"] != "incomplete"
+    result["full_access_supported"] = result["ready"] and result["full_access_supported"]
     return result

@@ -19,6 +19,7 @@ SOURCE_EXTRA = (
     'tests/test_chat_status.py', 'tests/test_cli.py', 'tests/test_codex_adapter.py',
     'tests/test_compatibility.py', 'tests/test_connections.py', 'tests/test_connections_ssh.py', 'tests/test_core.py',
     'tests/test_connection_entrypoints.py', 'tests/test_connection_integration.py',
+    'tests/test_execution_policy.py',
     'tests/test_install.py', 'tests/test_install_posix.py', 'tests/test_local_actions.py',
     'tests/test_mcp.py', 'tests/test_onboarding.py', 'tests/test_onefile.py',
     'tests/test_release.py', 'tests/test_runtime_platform.py', 'tests/test_runtime_readiness.py',

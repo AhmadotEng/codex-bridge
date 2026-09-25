@@ -10,13 +10,16 @@ from codex_bridge.compatibility import (WINDOWS_BUNDLE_PROFILES, accepts,
     inspect_runtime, inspect_runtime_bundle, validate_schema_bundle)
 
 
-def write_bundle(directory):
+def write_bundle(directory, *, full_access=False):
     string = {"type": "string"}
     policy = {"oneOf": [
         {"type": "object", "properties": {"type": {"enum": ["readOnly"]}, "networkAccess": {"type": "boolean"}}, "required": ["type"]},
         {"type": "object", "properties": {"type": {"enum": ["workspaceWrite"]}, "networkAccess": {"type": "boolean"}, "writableRoots": {"type": "array", "items": string}, "excludeTmpdirEnvVar": {"type": "boolean"}, "excludeSlashTmp": {"type": "boolean"}}, "required": ["type"]}]}
     common = {"cwd": string, "approvalPolicy": {"enum": ["never"]}, "approvalsReviewer": {"enum": ["user"]},
               "sandbox": {"enum": ["read-only", "workspace-write"]}, "config": {"type": "object", "additionalProperties": True}, "developerInstructions": string}
+    if full_access:
+        policy["oneOf"].append({"type": "object", "properties": {"type": {"enum": ["dangerFullAccess"]}}, "required": ["type"]})
+        common["sandbox"]["enum"].append("danger-full-access")
     methods = {
         "initialize": {"clientInfo": True, "capabilities": True},
         "thread/start": {**common, "ephemeral": {"type": "boolean"}, "dynamicTools": True},
@@ -61,6 +64,74 @@ class CompatibilityTests(unittest.TestCase):
             self.assertTrue(result["ready"], result)
             self.assertEqual(len(result["schema_sha256"]), 64)
             self.assertIn("thread/name/set", result["checked_methods"])
+
+    def test_full_access_is_optional_and_independently_reported(self):
+        restricted = validate_schema_bundle(self.directory)
+        self.assertTrue(restricted["ready"])
+        self.assertFalse(restricted["full_access_supported"])
+        self.assertEqual(restricted["errors"], [])
+        self.assertTrue(restricted["full_access_errors"])
+        write_bundle(self.directory, full_access=True)
+        supported = validate_schema_bundle(self.directory)
+        self.assertTrue(supported["ready"])
+        self.assertTrue(supported["full_access_supported"])
+        self.assertEqual(supported["full_access_errors"], [])
+
+    def test_full_access_checks_each_native_request_and_thread_response(self):
+        for missing in ("thread/start", "thread/resume", "turn/start", "v2/ThreadStartResponse", "v2/ThreadResumeResponse"):
+            with self.subTest(missing=missing):
+                bundle = write_bundle(self.directory, full_access=True)
+                if missing.startswith("v2/"):
+                    shape = bundle[missing]
+                    shape["properties"]["sandbox"]["oneOf"].pop()
+                    self.replace(missing, shape)
+                else:
+                    shape = bundle["ClientRequest"]
+                    for item in shape["oneOf"]:
+                        if item["properties"]["method"]["enum"] == [missing]:
+                            props = item["properties"]["params"]["properties"]
+                            if missing == "turn/start":
+                                props["sandboxPolicy"]["oneOf"].pop()
+                            else:
+                                props["sandbox"]["enum"].remove("danger-full-access")
+                    self.replace("ClientRequest", shape)
+                result = validate_schema_bundle(self.directory)
+                self.assertTrue(result["ready"], result)
+                self.assertFalse(result["full_access_supported"], result)
+                self.assertEqual(result["errors"], [])
+
+    def test_full_access_undeclared_discriminator_is_not_support(self):
+        for target in ("request", "response"):
+            bundle = write_bundle(self.directory, full_access=True)
+            if target == "request":
+                shape = bundle["ClientRequest"]
+                for item in shape["oneOf"]:
+                    if item["properties"]["method"]["enum"] == ["turn/start"]:
+                        props = item["properties"]["params"]["properties"]
+                        props["sandboxPolicy"]["oneOf"][-1] = {"type": "object", "properties": {"other": {"type": "string"}}}
+                self.replace("ClientRequest", shape)
+            else:
+                shape = bundle["v2/ThreadResumeResponse"]
+                shape["properties"]["sandbox"]["oneOf"][-1] = {"type": "object", "properties": {"other": {"type": "string"}}}
+                self.replace("v2/ThreadResumeResponse", shape)
+            result = validate_schema_bundle(self.directory)
+            self.assertFalse(result["full_access_supported"])
+            self.assertTrue(result["full_access_errors"])
+
+    def test_full_access_native_allof_response_wrapper_and_constraints(self):
+        bundle = write_bundle(self.directory, full_access=True)
+        for name in ("v2/ThreadStartResponse", "v2/ThreadResumeResponse"):
+            shape = bundle[name]
+            shape["definitions"] = {"SandboxPolicy": shape["properties"]["sandbox"]}
+            shape["properties"]["sandbox"] = {"allOf": [{"$ref": "#/definitions/SandboxPolicy"}], "description": "Native compatibility field"}
+            self.replace(name, shape)
+        supported = validate_schema_bundle(self.directory)
+        self.assertTrue(supported["full_access_supported"], supported)
+        shape["properties"]["sandbox"]["allOf"].append({"properties": {"type": {"enum": ["readOnly", "workspaceWrite"]}}})
+        self.replace(name, shape)
+        restricted = validate_schema_bundle(self.directory)
+        self.assertTrue(restricted["ready"], restricted)
+        self.assertFalse(restricted["full_access_supported"])
 
     def test_missing_method_and_new_required_field_fail_closed(self):
         schema = copy.deepcopy(self.bundle["ClientRequest"])

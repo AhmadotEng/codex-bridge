@@ -1,5 +1,13 @@
 # Verification
 
+## 0.3.2-rc.2 owner-selected execution policy
+
+This candidate adds `full-access` for an explicitly selected local project. Existing project defaults and waiting-only startup are unchanged. A peer task cannot change its receiving project's policy. The installed runtime must validate the full-access request and response schemas before any such turn starts; an unsupported runtime does not fall back to another policy.
+
+On **Windows, Python 3.11, and Codex 0.153.4**, an isolated native verification completed two turns in the same dedicated conversation. The first fetched a marker from a temporary loopback HTTP endpoint and wrote/read the exact response in an owner-selected fixture file outside the workspace. The second recalled a conversation-only marker, read the file, and removed that exact file. Both turns produced native command completion evidence with successful exits; the HTTP server independently observed requests, and the harness independently checked the file and its removal. The worker released its App Server after each turn. The existing live Bridge configuration remained byte-for-byte unchanged.
+
+This proves local owner-account command, filesystem, network, and retained-context behavior. It does not prove public-internet access, administrator elevation, Linux full-access activation, or live deployment of this candidate. The earlier connection/startup results below remain version-specific evidence; real two-computer managed-tunnel and reboot acceptance remains pending.
+
 ## 0.3.2-rc.1 waiting/connection candidate
 
 This prerelease changes connection management and is **experimental**. Earlier working Windows/Linux sessions below used the legacy route and do not verify the new two-candidate selection protocol. Assess candidate source tests, package installation, real receiving authentication, model tasks, and OS startup/reboot separately.

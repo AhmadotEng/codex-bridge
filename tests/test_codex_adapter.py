@@ -12,8 +12,9 @@ from codex_bridge.codex_adapter import AdapterError, CodexAdapter, _Run, MAX_EXE
 
 
 class FakeAdapter(CodexAdapter):
-    def __init__(self):
+    def __init__(self, *, full_access_supported=False):
         super().__init__("unused", run_timeout=1)
+        self._compatibility = {"full_access_supported": full_access_supported}
         self.calls = []
         self.sent = []
         self.serial = 0
@@ -29,7 +30,8 @@ class FakeAdapter(CodexAdapter):
         self.calls.append((method, params))
         if method in {"thread/start", "thread/resume"}:
             self.serial += 1
-            return {"thread": {"id": params.get("threadId", f"thread-{self.serial}")}, "sandbox": {"type": "readOnly" if params["sandbox"] == "read-only" else "workspaceWrite"}, "approvalPolicy": params["approvalPolicy"]}
+            sandbox_type = {"read-only": "readOnly", "workspace-write": "workspaceWrite", "danger-full-access": "dangerFullAccess"}[params["sandbox"]]
+            return {"thread": {"id": params.get("threadId", f"thread-{self.serial}")}, "sandbox": {"type": sandbox_type}, "approvalPolicy": params["approvalPolicy"]}
         if method == "mcpServerStatus/list":
             return {"data": [], "nextCursor": None}
         if method == "turn/start":
@@ -140,6 +142,130 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("error", self.adapter.sent[5])
         self.assertIn("error", self.adapter.sent[6])
         self.assertEqual(len(self.adapter._active["thread"].blocked), len(methods))
+
+    async def test_full_access_native_policy_and_resume_context(self):
+        self.adapter = FakeAdapter(full_access_supported=True)
+        first = await self.adapter.run(self.workspace, "Maintain the requested local service", policy="full-access")
+        result = await self.adapter.run(self.workspace, "Continue the same work", thread_id=first["thread_id"], policy="full-access")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(first["thread_id"], result["thread_id"])
+        for method, params in self.adapter.calls:
+            if method in ("thread/start", "thread/resume"):
+                self.assertEqual(params["sandbox"], "danger-full-access")
+                self.assertEqual(params["approvalPolicy"], "never")
+                self.assertIn("expressly requested software installation", params["developerInstructions"])
+                self.assertIn("owner-local authentication", params["developerInstructions"])
+                self.assertIn("Never extract, expose, copy, or transfer", params["developerInstructions"])
+                self.assertIn("Do not bypass OS or administrator authorization", params["developerInstructions"])
+                self.assertNotIn("Do not change Codex configuration", params["developerInstructions"])
+                self.assertFalse(params["config"]["features.apps"])
+                self.assertFalse(params["config"]["features.plugins"])
+                self.assertNotIn("sandbox_workspace_write.network_access", params["config"])
+                self.assertNotIn("force", params)
+            if method == "turn/start":
+                self.assertEqual(params["sandboxPolicy"], {"type": "dangerFullAccess"})
+                self.assertEqual(params["approvalPolicy"], "never")
+        capabilities = await self.adapter.capabilities()
+        self.assertIn("full-access", capabilities["policies"])
+        self.assertTrue(capabilities["network_access_by_policy"]["full-access"])
+        self.assertFalse(capabilities["network_access_by_policy"]["workspace-write"])
+        self.assertEqual(capabilities["policy_details"]["full-access"]["filesystem"], "owner-account")
+        self.assertFalse(capabilities["personal_apps_and_hooks"])
+
+    async def test_full_access_missing_schema_support_fails_before_thread(self):
+        for compatibility in ({}, {"full_access_supported": False}):
+            self.adapter._compatibility = compatibility
+            result = await self.adapter.run(self.workspace, "x", policy="full-access", thread_id="owned-thread")
+            self.assertEqual(result["error"]["code"], "unsupported_full_access")
+            self.assertEqual(self.adapter.calls, [])
+            capabilities = await self.adapter.capabilities()
+            self.assertNotIn("full-access", capabilities["policies"])
+            self.assertFalse(capabilities["policy_details"]["full-access"]["supported"])
+        restricted = await self.adapter.run(self.workspace, "still usable", policy="workspace-write")
+        self.assertEqual(restricted["status"], "completed")
+        with self.assertRaises(AdapterError):
+            await self.adapter.run(self.workspace, "x", policy="full-access", writable_roots=[self.workspace])
+
+    async def test_network_reply_is_allowed_only_for_full_access(self):
+        for policy in ("read-only", "workspace-write", "full-access"):
+            with self.subTest(policy=policy):
+                adapter = FakeAdapter(full_access_supported=True)
+                original = adapter._rpc
+                async def rpc(method, params):
+                    result = await original(method, params)
+                    if method in ("thread/start", "thread/resume"):
+                        result["sandbox"]["networkAccess"] = True
+                    return result
+                adapter._rpc = rpc
+                result = await adapter.run(self.workspace, "x", policy=policy)
+                if policy == "full-access":
+                    self.assertEqual(result["status"], "completed")
+                else:
+                    self.assertEqual(result["error"]["code"], "policy_mismatch")
+                    self.assertNotIn("turn/start", [method for method, _ in adapter.calls])
+
+    async def test_full_access_and_restricted_policy_mismatches_stop_before_turn(self):
+        cases = [("read-only", "dangerFullAccess", None),
+                 ("workspace-write", "dangerFullAccess", None),
+                 ("full-access", "workspaceWrite", None),
+                 ("full-access", "readOnly", "owned-thread"),
+                 ("read-only", "dangerFullAccess", "owned-thread")]
+        for policy, response_type, thread_id in cases:
+            with self.subTest(policy=policy, response_type=response_type, thread_id=thread_id):
+                adapter = FakeAdapter(full_access_supported=True)
+                original = adapter._rpc
+                async def rpc(method, params):
+                    result = await original(method, params)
+                    if method in ("thread/start", "thread/resume"):
+                        result["sandbox"] = {"type": response_type}
+                    return result
+                adapter._rpc = rpc
+                result = await adapter.run(self.workspace, "x", policy=policy, thread_id=thread_id)
+                self.assertEqual(result["error"]["code"], "policy_change_requires_new_session" if thread_id else "policy_mismatch")
+                self.assertNotIn("turn/start", [method for method, _ in adapter.calls])
+                if thread_id:
+                    self.assertNotIn("thread/start", [method for method, _ in adapter.calls])
+
+    async def test_full_access_still_requires_never_approval_and_designated_thread(self):
+        for wrong_field in ("approvalPolicy", "thread"):
+            adapter = FakeAdapter(full_access_supported=True)
+            original = adapter._rpc
+            async def rpc(method, params):
+                result = await original(method, params)
+                if method == "thread/resume":
+                    result[wrong_field] = "on-request" if wrong_field == "approvalPolicy" else {"id": "unrelated-thread"}
+                return result
+            adapter._rpc = rpc
+            result = await adapter.run(self.workspace, "x", thread_id="owned-thread", policy="full-access")
+            self.assertEqual(result["error"]["code"], "policy_mismatch" if wrong_field == "approvalPolicy" else "invalid_thread_response")
+            self.assertEqual(result["thread_id"], "owned-thread")
+            self.assertNotIn("turn/start", [method for method, _ in adapter.calls])
+
+    async def test_full_access_cancellation_keeps_native_evidence_and_denies_approvals(self):
+        self.adapter = FakeAdapter(full_access_supported=True)
+        original = self.adapter._rpc
+        async def rpc(method, params):
+            result = await original(method, params)
+            if method == "turn/start":
+                self.adapter._notification("item/completed", {"threadId": params["threadId"],
+                    "turnId": result["turn"]["id"], "item": self.command_item()})
+                await self.adapter._deny_server_request({"id": 1, "method": "item/permissions/requestApproval",
+                    "params": {"threadId": params["threadId"]}})
+            return result
+        self.adapter._rpc = rpc
+        started = asyncio.Event()
+        ids = []
+        async def on_started(thread_id, turn_id):
+            ids.extend((thread_id, turn_id)); started.set()
+        task = asyncio.create_task(self.adapter.run(self.workspace, "wait", policy="full-access", on_started=on_started))
+        await started.wait()
+        await self.adapter.cancel(*ids)
+        result = await task
+        self.assertEqual(result["status"], "interrupted")
+        self.assertEqual(result["execution_evidence"]["native_command_execution"], "observed")
+        self.assertEqual(result["execution_evidence"]["successful_exit_count"], 1)
+        self.assertEqual(self.adapter.sent[-1]["result"]["permissions"], {})
+        self.assertNotIn("PRIVATE-", json.dumps(result))
 
     async def test_timeout_interrupts_no_automatic_reexecution(self):
         self.adapter.run_timeout = 0.01

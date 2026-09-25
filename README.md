@@ -15,12 +15,12 @@ Let two people's Codex installations exchange project tasks, replies, and select
 
 ## Install on both computers
 
-Use local Python 3.11+, a complete Codex installation signed into your own account, and OpenSSH. Download and extract the matching installer from the [0.3.2 release candidate](https://github.com/AhmadotEng/codex-bridge/releases/tag/v0.3.2-rc.1). Compare its SHA-256 with that release's `SHA256SUMS`.
+Use local Python 3.11+, a complete Codex installation signed into your own account, and OpenSSH. Download and extract the matching installer from the [0.3.2 release candidate](https://github.com/AhmadotEng/codex-bridge/releases/tag/v0.3.2-rc.2). Compare its SHA-256 with that release's `SHA256SUMS`.
 
 | Download | Run inside the extracted `codex-bridge` folder |
 | --- | --- |
-| [Windows ZIP](https://github.com/AhmadotEng/codex-bridge/releases/download/v0.3.2-rc.1/codex-bridge-0.3.2-rc.1-windows.zip) | PowerShell: `.\scripts\setup.ps1` |
-| [Linux tar.gz](https://github.com/AhmadotEng/codex-bridge/releases/download/v0.3.2-rc.1/codex-bridge-0.3.2-rc.1-linux.tar.gz) | Terminal: `sh scripts/setup.sh` |
+| [Windows ZIP](https://github.com/AhmadotEng/codex-bridge/releases/download/v0.3.2-rc.2/codex-bridge-0.3.2-rc.2-windows.zip) | PowerShell: `.\scripts\setup.ps1` |
+| [Linux tar.gz](https://github.com/AhmadotEng/codex-bridge/releases/download/v0.3.2-rc.2/codex-bridge-0.3.2-rc.2-linux.tar.gz) | Terminal: `sh scripts/setup.sh` |
 
 Both contain the same Bridge source and guides. Setup creates this computer's private configuration and registers its MCP tools. It does not copy accounts, install SSH services, or alter unrelated routes. The default location is `~/plugins/codex-bridge`; existing settings are preserved and conflicts are reported.
 
@@ -37,6 +37,8 @@ In your ordinary local Codex task, ask:
 Codex checks local readiness, connects the selected peer, and verifies its Bridge before sending work. A local connection request can start your own daemon. If the other daemon is stopped, its owner must start it locally; restricted SSH does not provide a remote shell.
 
 A session links **two local conversations**, rather than mirroring all account chats. Use `session_chat` to find this computer's project task. Another project needs new workspace selection and a session, not another installation.
+
+Projects default to **read-only**. An owner can choose `workspace-write` for project edits or explicitly enable **`full-access`** for a dedicated maintenance project. Full access lets its Bridge worker use that owner's filesystem, commands, and network to complete authorized setup/maintenance tasks and return results directly. It does not grant root/administrator elevation or copy account credentials. See [project permissions and owner setup](docs/PERMISSIONS.md).
 
 ## Local controls when tools are unavailable
 
@@ -73,6 +75,7 @@ A Tailscale listing, SSH process, or listening port is not evidence of completed
 ## Details
 
 - [Setup, projects, and first task](docs/SETUP.md)
+- [Project permissions and full-access maintenance](docs/PERMISSIONS.md)
 - [SSH receiving access on Windows and Linux](docs/RECEIVING-SSH.md)
 - [Tailscale and reciprocal network permission](docs/TAILSCALE.md)
 - [Connection selection, retries, idle lifetime, and migration](docs/CONNECTIONS.md)

@@ -364,9 +364,9 @@ def project_select(path, *, project_id=None, name=None, workspace=None, peer_id=
     identifier(selected_peer, 'peer_id')
     if selected_peer not in cfg.get('peers', {}):
         raise BridgeError('pairing_required', 'Add this computer with pair-setup before selecting its project scope.')
-    selected_policy = policy or old.get('policy', 'read-only')
-    if selected_policy not in ('read-only', 'workspace-write'):
-        raise BridgeError('configuration', 'Project policy must be read-only or workspace-write.')
+    selected_policy = old.get('policy', 'read-only') if policy is None else policy
+    if selected_policy not in ('read-only', 'workspace-write', 'full-access'):
+        raise BridgeError('configuration', 'Project policy must be read-only, workspace-write, or full-access.')
     selected_ops = operations if operations is not None else old.get('allowed_ops', ['tasks', 'messages', 'artifacts', 'context'])
     if isinstance(selected_ops, str):
         selected_ops = [value.strip() for value in selected_ops.split(',') if value.strip()]
@@ -632,10 +632,17 @@ def preflight(path, *, peer_id=None, project_id=None, runtime_probe=inspect_runt
             project = cfg.get('projects', {}).get(project_id)
             valid = bool(project and selected in project.get('allowed_peers', []) and
                          Path(project.get('workspace', '')).is_dir() and
-                         project.get('policy') in ('read-only', 'workspace-write'))
+                         project.get('policy', 'read-only') in ('read-only', 'workspace-write', 'full-access'))
             add('project_scope', 'pass' if valid else 'fail', 'project_selected' if valid else 'project_scope_missing',
                 'This computer has selected the project workspace for this peer.' if valid else
                 'Run project-select locally with this project ID and paired computer.', project_id=project_id, **safe)
+            if valid and project.get('policy') == 'full-access':
+                supported = runtime.get('full_access_supported') is True
+                add('execution_policy', 'pass' if supported else 'fail',
+                    'full_access_supported' if supported else 'full_access_unsupported',
+                    'Full-access schema support is verified; execution uses the local account and OS permissions.' if supported else
+                    'The selected runtime has not verified full-access support. Keep tasks stopped until a compatible runtime is selected.',
+                    project_id=project_id, policy='full-access', **safe)
             if reachable.get('ok'):
                 remote_id = project.get('peer_project_id', project_id) if project else project_id
                 remote_project = next((item for item in reachable.get('projects', [])

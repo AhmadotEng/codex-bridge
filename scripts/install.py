@@ -23,7 +23,7 @@ REQUIRED = (
 )
 OPTIONAL = ("README.md", "LICENSE", "LICENSE.md", "NOTICES", "NOTICES.md", "config.example.json",
             "docs/SETUP.md", "docs/ONBOARDING-PLAN.md", "docs/ADVANCED.md", "docs/SECURITY.md",
-            "docs/TESTING.md", "docs/TAILSCALE.md", "docs/RUNTIME.md", "docs/LINUX.md", "docs/CONNECTIONS.md", "docs/RECEIVING-SSH.md", "config.tailscale.example.json",
+            "docs/TESTING.md", "docs/TAILSCALE.md", "docs/RUNTIME.md", "docs/LINUX.md", "docs/CONNECTIONS.md", "docs/RECEIVING-SSH.md", "docs/PERMISSIONS.md", "config.tailscale.example.json",
             "examples/computer-a.example.json", "examples/computer-b.example.json")
 
 

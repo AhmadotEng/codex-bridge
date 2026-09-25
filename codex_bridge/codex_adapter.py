@@ -201,7 +201,7 @@ class CodexAdapter:
             self._stderr = asyncio.create_task(self._drain_stderr())
             try:
                 self._initialized = await self._rpc("initialize", {
-                    "clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.3.2-rc.1"},
+                    "clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.3.2-rc.2"},
                     "capabilities": {"experimentalApi": self.enable_local_actions},
                 })
                 await self._send({"method": "initialized", "params": {}})
@@ -211,13 +211,22 @@ class CodexAdapter:
 
     async def capabilities(self) -> dict:
         await self.start()
+        full_access = self._compatibility.get("full_access_supported") is True
+        policies = ["read-only", "workspace-write"] + (["full-access"] if full_access else [])
+        policy_details = {
+            "read-only": {"supported": True, "network_access": False, "filesystem": "read-only"},
+            "workspace-write": {"supported": True, "network_access": False, "filesystem": "selected-workspace"},
+            "full-access": {"supported": full_access, "network_access": True, "filesystem": "owner-account",
+                            "os_permissions": "existing-owner-privileges", "owner_selection_required": True},
+        }
         return {
             "adapter": "codex-app-server-stdio", "codex_version": self._version,
             "tested_versions": sorted(TESTED_VERSIONS), "ready": True,
             "compatibility": self._compatibility,
             "native_tool_execution": "not_checked",
             "context_retention": "thread/resume", "cancellation": "turn/interrupt",
-            "policies": ["read-only", "workspace-write"], "network_access": False,
+            "policies": policies, "policy_details": policy_details, "network_access": False,
+            "network_access_by_policy": {policy: policy_details[policy]["network_access"] for policy in policies},
             "approval_behavior": "deny-and-report", "model": "local-configured-default",
             "authentication": "local-codex-login", "unrelated_thread_discovery": False,
             "allowed_mcp_servers": sorted(self.allowed_mcp_servers),
@@ -468,8 +477,12 @@ class CodexAdapter:
             if writable_roots:
                 raise AdapterError("invalid_policy", "Read-only requests cannot include writable roots")
             return str(root), {"type": "readOnly", "networkAccess": False}
+        if policy == "full-access":
+            if writable_roots:
+                raise AdapterError("invalid_policy", "Full-access execution does not use writable-root restrictions")
+            return str(root), {"type": "dangerFullAccess"}
         if policy != "workspace-write":
-            raise AdapterError("invalid_policy", "Only read-only and workspace-write execution are supported")
+            raise AdapterError("invalid_policy", "Execution policy must be read-only, workspace-write, or full-access")
         roots = []
         for value in writable_roots or [str(root)]:
             path = Path(value)
@@ -495,13 +508,23 @@ class CodexAdapter:
         await self.start()
         state: _Run | None = None
         resuming = bool(thread_id)
+        requested_thread_id = thread_id
         try:
+            if policy == "full-access" and self._compatibility.get("full_access_supported") is not True:
+                raise AdapterError("unsupported_full_access", "The selected Codex runtime has not validated full-access thread, resume, turn, and response policies. Select a compatible local runtime. No turn was started.")
             if thread_id in self._active:
                 raise AdapterError("thread_busy", "A bridge turn is already active on this conversation")
             config = self._integration_overrides(workspace)
-            config.update({"sandbox_workspace_write.writable_roots": sandbox.get("writableRoots", []), "sandbox_workspace_write.network_access": False, "sandbox_workspace_write.exclude_tmpdir_env_var": True, "sandbox_workspace_write.exclude_slash_tmp": True})
-            params = {"cwd": workspace, "approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": policy, "config": config,
-                      "developerInstructions": "This is a Codex Bridge collaboration task. Work only on the selected project and explicit request. Do not read credentials, browser sessions, private keys, unrelated projects, or unrelated conversations. Do not change Codex configuration or install plugins. Keep returned results relevant to this project. Do not delegate or send another bridge task unless the task explicitly asks you to. If blocked by scope or permissions, report the limitation."}
+            if policy != "full-access":
+                config.update({"sandbox_workspace_write.writable_roots": sandbox.get("writableRoots", []), "sandbox_workspace_write.network_access": False, "sandbox_workspace_write.exclude_tmpdir_env_var": True, "sandbox_workspace_write.exclude_slash_tmp": True})
+            instructions = "This is a Codex Bridge collaboration task. Work only on the selected project and explicit request. "
+            if policy == "full-access":
+                instructions += ("The local owner explicitly selected full-access execution for this project. You may execute the requested commands, use the network, and perform expressly requested software installation, configuration changes (including Codex configuration), and service maintenance using the owner's existing OS privileges. Use existing owner-local authentication through normal software and tool flows. Never extract, expose, copy, or transfer account tokens, credentials, private keys, or browser sessions. Do not access unrelated projects or conversations. Do not bypass OS or administrator authorization; report requirements that the current account cannot satisfy. Personal MCP servers, apps, and plugins are not automatically authorized by full access. ")
+            else:
+                instructions += "Do not read credentials, browser sessions, private keys, unrelated projects, or unrelated conversations. Do not change Codex configuration or install plugins. "
+            instructions += "Keep returned results relevant to this project. Do not delegate or send another bridge task unless the task explicitly asks you to. If blocked by scope or permissions, report the limitation."
+            params = {"cwd": workspace, "approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": "danger-full-access" if policy == "full-access" else policy, "config": config,
+                      "developerInstructions": instructions}
             if thread_id:
                 params.update(threadId=thread_id, excludeTurns=True)
                 reply = await self._rpc("thread/resume", params)
@@ -512,13 +535,16 @@ class CodexAdapter:
                         "description": "Run a fixed owner-authorized project action. Only these reviewed operations are available: " + json.dumps(local_actions) + ". Supply a stable request_id for deduplication; reuse it when checking the same invocation. This capability does not authorize arbitrary commands or changes to action configuration.",
                         "inputSchema": {"type": "object", "properties": {"action_id": {"type": "string", "enum": [a["action_id"] for a in local_actions]}, "request_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"}}, "required": ["action_id", "request_id"], "additionalProperties": False}}]
                 reply = await self._rpc("thread/start", params)
-            thread_id = reply.get("thread", {}).get("id")
-            if not thread_id:
+            returned_thread_id = reply.get("thread", {}).get("id")
+            if not returned_thread_id:
                 raise AdapterError("invalid_thread_response", "Codex did not return a conversation ID")
+            if resuming and returned_thread_id != requested_thread_id:
+                raise AdapterError("invalid_thread_response", "Codex did not resume the designated conversation. No turn was started.")
+            thread_id = returned_thread_id
             if resuming and reply.get("sandbox", {}).get("type") != sandbox["type"]:
                 raise AdapterError("policy_change_requires_new_session", "Codex retained the loaded conversation's previous sandbox policy. Start a new collaboration session with the selected policy, or restart the local bridge before resuming. No turn was started.")
-            if reply.get("sandbox", {}).get("type") != sandbox["type"] or reply.get("sandbox", {}).get("networkAccess", False) or reply.get("approvalPolicy") != "never":
-                raise AdapterError("policy_mismatch", "Codex did not accept the requested restricted execution policy")
+            if reply.get("sandbox", {}).get("type") != sandbox["type"] or (policy != "full-access" and reply.get("sandbox", {}).get("networkAccess", False)) or reply.get("approvalPolicy") != "never":
+                raise AdapterError("policy_mismatch", "Codex did not accept the requested execution policy")
             await self._validate_integrations(thread_id)
             state = _Run(thread_id)
             if local_actions:

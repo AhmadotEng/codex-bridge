@@ -8,7 +8,7 @@ You need Python 3.11+, a working local Codex sign-in, and authorized SSH reachab
 
 Windows automatic startup also needs `pythonw.exe` beside the selected Python executable. Standard Windows Python installations include it; a custom runtime without it can still use manual startup.
 
-Bridge uses that connection without requesting a remote shell. It does not install SSH, change firewall/router rules, copy private keys, or reconfigure other application tunnels. A forwarding-only relay is not a shell on the destination computer.
+Bridge's SSH transport uses that connection without requesting a remote shell. The installer does not install SSH, change firewall/router rules, copy private keys, or reconfigure other application tunnels. An explicitly authorized full-access maintenance worker can later perform owner-permitted local administration commands through Codex. That does not make the SSH relay a shell.
 
 Download or clone this repository into a source folder. Keep it separate from the installation folder `~/plugins/codex-bridge`.
 
@@ -104,6 +104,8 @@ The default policy is `read-only`. To explicitly authorize project edits:
 
 Project policies rely on Codex's sandbox; selecting a folder is not a hard barrier against reading everything visible to that operating-system account. See [security boundaries](SECURITY.md). A changed workspace, policy, or capability scope calls for a new collaboration session.
 
+For direct setup/maintenance work beyond a project folder, the local owner can choose `--policy full-access` on a **new dedicated maintenance project**. The worker then has the owner's filesystem, command, and network access, subject to operating-system permissions. This is an explicit local configuration choice; a peer task or RPC cannot override the configured policy. Existing read-only/workspace-write projects remain as configured. Follow the short [Windows/Linux activation examples](PERMISSIONS.md#enable-a-dedicated-maintenance-project).
+
 ## 5. Enable startup, start now, and verify
 
 On both Windows computers, while signed into the desktop:
@@ -179,6 +181,8 @@ New Bridge chats receive the project title. After a task, Bridge closes its work
 | `failed` / `release_unconfirmed` | Inspect the request before retrying or opening |
 
 Ownership is an observation, not a live lock query against the desktop. Automatic sidebar refresh and desktop notifications are not guaranteed. A remote conversation ID is not a local chat.
+
+Use an ordinary local Codex task to choose project permissions and dispatch work through Bridge MCP. The Bridge-managed project conversation is the worker's retained context. If that same conversation is open elsewhere and returns `conversation_in_use`, release it there and inspect the saved result. A terminal refusal with no turn started needs a new explicit task ID in the same session; the original ID returns its saved refusal. Uncertain requests retain their IDs until their effects are established. Do not take over a conversation or create duplicate sessions. A newly authorized maintenance project is a separate scope, not a renamed or cloned copy of the read-only test conversation.
 
 ## Everyday use and another project
 

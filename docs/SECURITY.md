@@ -16,9 +16,9 @@ The recommended Tailscale route carries ordinary OpenSSH; it does not replace SS
 
 ## Startup and process ownership
 
-Windows startup is opt-in and limited to the signed-in owner. Registration selects the daemon and explicitly chosen existing peer routes; future peers are not automatically included. The scheduled tasks do not contain account passwords or request elevated Codex execution. They cannot execute Codex before the owner signs in.
+Windows startup is opt-in and limited to the signed-in owner; Linux uses an optional systemd user service. Ordinary startup registers the waiting daemon only. Persistent peer connections are a separate explicit choice; future peers are not automatically included. Windows tasks contain no account passwords and request no elevated execution. Full-access project policy does not change their operating-system principal.
 
-Start/stop controls use Bridge-owned process identity and lifecycle locks. A stale or unverifiable process record does not authorize terminating an arbitrary PID. A deliberate stop remains effective for the current owner login; disabling future startup preserves currently running work. Uninstalling requires disabling startup, stopping its components, and removing their registrations.
+Start/stop controls use Bridge-owned process identity and lifecycle locks. A stale or unverifiable process record does not authorize terminating an arbitrary PID. A peer disconnect persists until its local owner resumes; disabling future startup preserves currently running work. Uninstalling requires disabling startup, stopping its components, and removing their registrations.
 
 Tailscale unattended mode and automatic OpenSSH service startup can provide the network before login. That does not grant access to a Codex account or turn Bridge into a Windows system service. An expired Tailscale login or revoked SSH key can still interrupt a route independently of Bridge startup.
 
@@ -26,7 +26,7 @@ Tailscale unattended mode and automatic OpenSSH service startup can provide the 
 
 Every received operation must match an enabled peer, a project selected locally for that peer, and a session belonging to that peer. Tasks, messages, artifacts, and context updates are separate allowed operation classes. A session uses the intersection of both computers' configured operations. Local project changes continue to constrain existing sessions.
 
-Peer tools cannot add trusted computers, select arbitrary workspace roots, edit local bridge configuration, install plugins, or call an unrestricted shell operation. Messages and artifacts are data, not instructions that can expand local authorization. The MCP tools expose defined collaboration operations; local administration remains in the CLI. The safe status and local-chat views are unavailable through peer credentials.
+Peer RPC exposes defined collaboration operations; it cannot select a different execution policy, add trusted computers, or change project configuration. Those choices belong to local owner setup. Messages and artifacts do not grant additional permissions. A full-access worker is intentionally allowed to run owner-level commands, including authorized maintenance outside the project directory; the RPC boundary is not a filesystem sandbox around that worker. The safe local-status and local-chat views remain unavailable through peer credentials.
 
 Different sessions retain different context and conversation IDs. Sessions serialize their task turns to avoid concurrent modification of the same conversation. Project/session state separation does not create separate Windows users or an operating-system container. Selecting the same physical workspace for two projects can still create ordinary file-level interference; choose separate directories when isolation is needed.
 
@@ -36,17 +36,25 @@ Workers run the locally installed Codex App Server with the local model default.
 
 Known Windows bundle profiles also check required companion-file presence and readability. This is not signature, distribution-hash, architecture, version-consistency, or execution verification. Select a complete trusted local runtime; do not mix binaries across versions or copy authentication to repair it. Unknown layouts remain explicitly unverified. Static preflight sends no model turn or project command. [Runtime repair](RUNTIME.md) preserves scopes and existing account settings.
 
-The default task policy is `read-only`. `workspace-write` must be chosen in local project configuration and restricts the writable roots requested from Codex to the selected workspace. Network access is disabled for worker execution. Approval requests and unsupported interactive prompts are denied and reported; they are not silently approved or redirected to another account.
+The default task policy is `read-only`. Local owners can select one of these policies per project:
 
-These policies rely on Codex's sandbox implementation and the host operating system. They are **not a hard read container**: a read-only policy prevents requested writes, but does not guarantee that the worker cannot read every other file visible to its Windows account. Use a separately restricted operating-system account or stronger isolation if that is required. Do not authorize task execution for a peer who should not be trusted with the resulting project outputs.
+| Policy | Worker execution |
+| --- | --- |
+| `read-only` | Read-only Codex sandbox; network disabled |
+| `workspace-write` | Codex writes restricted to the configured writable roots; network disabled |
+| `full-access` | Codex `danger-full-access`; owner-account filesystem/commands/network without the project sandbox |
 
-Personal MCP servers, plugins, apps, and hooks are disabled for worker turns by default, and the adapter checks that unexpected MCP tools are not exposed. A scoped bridge-only integration may be explicitly allowlisted by a reviewed local installation. That exception must not silently enable personal integrations or make bridge pairing equivalent to access to email, browser sessions, or unrelated applications. Ordinary local desktop conversations keep their own configured integrations; the worker overrides do not rewrite the user's global settings.
+`full-access` must be chosen in local project configuration. Peer-supplied fields cannot upgrade a task's policy. The selected workspace remains its working/context directory, **not** a filesystem security boundary in this mode. Authorizing it means trusting the designated peer's maintenance tasks with access to owner-readable/writable files and network services. It grants neither root/administrator elevation nor a sudo password. Operating-system permissions and local account authentication still apply. Approval requests and unsupported interactive prompts remain reported failures, not silent approval or copied credentials. See [permission setup](PERMISSIONS.md).
+
+The restricted policies rely on Codex's sandbox implementation and the host operating system. They are **not a hard read container**: a read-only policy prevents requested writes, but does not guarantee that the worker cannot read every other file visible to its operating-system account. Full-access deliberately removes the project sandbox; use a separately restricted operating-system account if a narrower account boundary is needed.
+
+Personal MCP servers, plugins, apps, and hooks remain disabled for worker turns by default, including full-access turns; the adapter checks for unexpected MCP exposure. Full access enables native commands/network, not automatic loading of personal integrations. A scoped bridge-only integration requires a separately reviewed local allowlist. Ordinary desktop conversations keep their own integrations; worker overrides do not rewrite global settings. An unsandboxed worker can nevertheless access resources available to its owner through native commands, so integration disabling is not an account-data isolation boundary.
 
 ## Files and results
 
 Each file transfer is one explicitly selected file. Files up to 8 MiB use direct transfer; negotiated chunked transfers support larger files with a default 256 MiB file ceiling, bounded storage, at most eight active transfers, and expiry of incomplete staging data. Export and import roots must be inside the selected workspace. The implementation rejects absolute paths, parent traversal, root escapes, symlinks, and Windows reparse-point paths. Artifact and chunk lookup are scoped to their originating peer and collaboration session.
 
-The receiver checks chunk and final byte lengths and SHA-256 and archives the artifact reference. A different existing destination is not overwritten. Identical transfers can be retried using the same operation ID. Large transfers stage data privately before publishing the completed file. Archive/staging quotas do not include completed files retained in the owner's selected import folders. This protects the bridge's transfer boundary; it is separate from the read/write abilities of an explicitly authorized Codex task.
+The receiver checks chunk and final byte lengths and SHA-256 and archives the artifact reference. A different existing destination is not overwritten. Identical transfers can be retried using the same operation ID. Large transfers stage data privately before publishing the completed file. Archive/staging quotas do not include completed files retained in the owner's selected import folders. These artifact API restrictions also apply to full-access projects, but they do not restrict the native file/network abilities of an authorized full-access task.
 
 Task prompts, progress, results, messages, and transferred logs can contain project information. Inspect them before exporting beyond the selected collaboration. Do not place account credentials or private keys in an export root. Peer text should be treated as untrusted content when included in later Codex prompts.
 

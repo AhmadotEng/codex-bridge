@@ -4,6 +4,8 @@ A Bridge task can arrive and produce a reply while native tools are unavailable.
 
 Bridge starts the owner's selected local Codex executable through the [Codex App Server](https://learn.chatgpt.com/docs/app-server). The private `codex_path` setting selects that runtime; the desktop app may be using a different installed bundle.
 
+Execution permissions come from the locally selected project policy. `read-only` and `workspace-write` keep their restricted, network-disabled worker modes. An explicitly configured `full-access` project uses Codex `danger-full-access` under the same local owner account. It does not repair a broken runtime, supply missing authentication, or grant OS elevation. See [project permissions](PERMISSIONS.md) before diagnosing an intended policy restriction as a runtime failure.
+
 ## Select a complete local bundle
 
 Point `codex_path` at the executable inside a complete, trusted local Codex runtime distribution. Keep its companion files together in their original version directory. Do not copy only `codex.exe`, mix helpers from different versions, or copy another person's account files or SSH keys.
@@ -97,6 +99,8 @@ Use `task_status` or `task_wait` and inspect `task.result.execution_evidence` on
 A dialogue-only task can validly complete with no native command. A declined or failed item without an exit code does not establish execution. A successful process exit still does not prove the requested file content or application behavior.
 
 For a file-writing test, first authorize that operation within the selected project's policy. Use a tiny selected input and a new destination in its export folder, refuse overwriting an existing file, and compute the output SHA-256 with a native command. Fetch that exact artifact and independently compare its bytes/hash with the expected result. File delivery alone proves neither that a command created it nor that the surrounding project works.
+
+For a full-access maintenance project, also verify an explicitly authorized temporary file outside the workspace and a non-sensitive approved network request. Record policy, command evidence, and observed results separately. Do not use account credentials, browser sessions, private SSH keys, or an OS privilege change as a smoke test. A `full-access` configuration entry by itself does not prove that the selected runtime executed with that policy.
 
 The structured evidence omits raw commands, working directories, environment, and output. Detailed task text or owner-inspected local conversation history can still contain project information; share only what the task requires.
 

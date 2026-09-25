@@ -1,6 +1,12 @@
 # Advanced operations
 
-The [setup guide](SETUP.md) covers normal two-computer use. This page covers optional packaging, fixed actions, additional peers, and removal.
+The [setup guide](SETUP.md) covers normal two-computer use. This page covers optional packaging, maintenance permissions, fixed actions, additional peers, and removal.
+
+## Full-access maintenance
+
+An owner may configure a dedicated project with `project-select --policy full-access` to let its Bridge worker execute authorized maintenance directly under the owner's account, including commands outside the workspace and network access. `read-only` remains the default; existing projects are not upgraded automatically. The initial policy is selected locally, never by peer RPC. See [Windows/Linux activation and conversation ownership](PERMISSIONS.md).
+
+Full access does not enable an SSH shell, copy account/private-key credentials, or confer root/administrator privileges. Plan a recovery path before a maintenance task stops or upgrades its own daemon. A stopped daemon still needs owner-local startup.
 
 ## Optional local plugin
 
@@ -36,11 +42,11 @@ This is only for the plugin installation route. `--mode prompt` restores per-cal
 
 ## Fixed local actions
 
-An owner may explicitly configure a project-specific operation that ordinary sandboxed Codex commands cannot perform. It is an optional local capability, not part of first-time pairing.
+An owner may explicitly configure one fixed project-specific operation while keeping the rest of a worker's commands sandboxed. This is useful when broad full access is unnecessary; it is optional and separate from first-time pairing.
 
 The project's private `local_actions` registry maps IDs to a title, fixed `argv`, absolute `cwd`, SHA-256 `guard_files`, timeout (up to 600 seconds), and bounded JSON output. Keep executable scripts, configuration and dependencies in owner-protected locations outside worker-writable project folders. Do not point an action at a general shell or a script that reads executable commands from untrusted project files.
 
-The local worker receives `bridge_local_action(action_id, request_id)`. It cannot supply additional arguments or paths. The operation runs as the local Bridge owner, while other worker commands keep their sandbox. Windows processes enter an owned Job before they start; cancellation closes only that process tree. It cannot undo external effects already completed.
+The local worker receives `bridge_local_action(action_id, request_id)`. It cannot supply additional arguments or paths. The operation runs as the local Bridge owner; other commands retain that project's chosen execution policy. Windows processes enter an owned Job before they start; cancellation closes only that process tree. It cannot undo external effects already completed.
 
 Each ID is durable. Reusing the same ID returns the original result. After an interrupted process, an action can be `uncertain`; inspect its effects before issuing a new request. The wrapper must emit sanitized JSON only. Raw stderr is not returned.
 
