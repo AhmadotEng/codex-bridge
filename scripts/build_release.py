@@ -16,7 +16,7 @@ SOURCE_EXTRA = (
     '.gitignore', '.gitattributes', '.github/workflows/test.yml',
     'scripts/build_release.py', 'scripts/build_launcher.py', 'scripts/onefile.py',
     'tests/test_artifacts.py', 'tests/test_autostart.py', 'tests/test_autostart_posix.py',
-    'tests/test_chat_status.py', 'tests/test_cli.py', 'tests/test_codex_adapter.py',
+    'tests/test_chat_status.py', 'tests/test_cli.py', 'tests/test_cli_startup_probe.py', 'tests/test_codex_adapter.py',
     'tests/test_compatibility.py', 'tests/test_connections.py', 'tests/test_connections_ssh.py', 'tests/test_core.py',
     'tests/test_connection_entrypoints.py', 'tests/test_connection_integration.py',
     'tests/test_execution_policy.py',
