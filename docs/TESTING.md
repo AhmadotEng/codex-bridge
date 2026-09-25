@@ -1,21 +1,55 @@
 # Verification
 
-## 0.3.2-rc.6 candidate: cancellation acknowledgments
+## 0.3.2-rc.6: tested deployments on September 25, 2026
 
-The rc.6 candidate retains pending artifact-abort acknowledgments as active work. An explicit cancellation retry uses the original transfer ID and clears its pending state only after a valid terminal acknowledgment. Concurrent cancellation replies cannot overwrite a completed result, and cancellation during transfer creation retains the returned transfer ID for reconciliation. This adds no automatic artifact retry or dialing policy. After revocation, local cleanup of retained SSH children remains possible without altering pending work or restoring remote access.
+rc.6 retains pending artifact-abort acknowledgments as active work. An explicit cancellation retry uses the original transfer ID and clears its pending state only after a valid terminal acknowledgment. Concurrent cancellation replies cannot overwrite a completed result, and cancellation during transfer creation retains the returned transfer ID for reconciliation. This adds no automatic artifact retry or dialing policy. After revocation, local cleanup of retained SSH children remains possible without altering pending work or restoring remote access.
 
-All 101 targeted artifact, core, connection-manager and owned-child cleanup checks passed without skips. Independent review accepted the fixes after reproducing the prior failure cases. Full candidate and deployment results are recorded separately when completed.
-
-Full Windows/Python 3.11 candidate verification passed **417 tests: 409 passed and eight platform skips**, in 137.649 seconds. Plugin manifest validation passed. Linux candidate, packaged installation and live promotion results remain pending at this source revision.
-
-Additional September 25 checks on the existing deployments passed:
+The exact candidate pins source revision `b62b9081441ef347cad945cdd735a65b0646ec14`. Its matching Windows/Linux installers contain the same 43 payload files. Source, package and live results are separate evidence:
 
 | Check | Observed result |
 | --- | --- |
-| Windows initiates to Linux | Pinned-host/public-key authentication and both allowed forwarding directions passed authenticated Bridge identity checks. The exact temporary SSH child exited and both temporary listeners were verified absent. Existing configuration, source, startup and legacy carrier were preserved. |
-| Linux owner-service preparation | All 20 native promotion-helper fixtures passed. An isolated rc.5 service completed registration, start, authenticated status, repeated-start reuse, 121.267 seconds of waiting, stop and removal. Seven samples observed no SSH process in its service cgroup and no connection journal records. Sampling cannot exclude a transient process between observations. |
+| Windows/Python 3.11 source | 417 tests: 409 passed, eight platform skips. |
+| Fedora/Python 3.14.7 source | 417 tests: 401 passed, 16 Windows-specific skips. |
+| CI | All seven [Windows, Ubuntu and macOS jobs](https://github.com/AhmadotEng/codex-bridge/actions/runs/36181417074) passed for the exact candidate. |
+| Isolated packages | Both installers passed installation/upgrade checks, preserving fixture configuration, context, conversations and saved results. Both installed MCP processes reported rc.6 and 21 tools. |
+| Windows live upgrade | All 43 installed files matched. One start used the existing owner-login task. All 1,044 previous record bodies and 335 artifact files were preserved; the original SSH carrier remained available. |
+| Linux live upgrade | All 43 installed files matched. The daemon now runs inside its previously registered, enabled owner user service, with verified runner/daemon creation identities and cgroup ownership. The old manual daemon exited; unit registration, enabled link, vendor policy, configuration and original SSH carrier were preserved. |
+| Linux saved data | All 622 previous journal keys remained: 621 record bodies were byte-identical, and only the maintenance session's timestamp changed for authorized verification. All 326 selected artifact files, totaling 13,617,872 bytes, matched before subsequent report transfers. No database rewind. |
+| Paired native execution after both upgrades | One native task in each direction completed successfully in the retained conversations; actual command exits and App Server writer release were verified. These tasks used the preserved **legacy route**, not managed connection selection. |
 
-These checks do not establish managed selection, simultaneous initiation or actual sign-in/reboot. Both live deployments still run rc.4 while the next candidate is prepared. The Linux real owner-login unit remains enabled but inactive beside its preserved manual daemon; only the isolated test unit was started and removed.
+All 101 focused artifact, core, manager and owned-child checks passed without skips; independent review reproduced the prior failures and accepted their fixes. Plugin manifest validation also passed.
+
+The Windows upgrade briefly added an explicit launch-mode field. A reviewed field-only correction restored the exact original configuration and ACL without another restart or restoring an old database. The Linux promotion intentionally activated its existing user service; it did not register another service, enable persistent transport, modify SSH or restore an older database. Private backups and credentials remained local.
+
+Earlier September 25 receiving checks passed pinned-host/public-key authentication and both permitted forwarding channels from each computer. Separately, the unchanged Linux helper workflow passed 20 native fixtures and a 121.267-second isolated owner-service lifecycle. These checks support the receiving and service paths; they do not establish managed selection or sign-in/reboot behavior. Sampled absence of SSH processes is not exhaustive proof that no transient process ever existed.
+
+### Managed activation and reuse
+
+Both computers accepted the same authenticated **Windows-origin managed tunnel, generation 1**, after matching decisions and a 90-second mutual health guard. Both owner-local helpers exited. Fresh authenticated checks confirmed both Bridges and their local Codex runtimes were ready; application dispatch was released afterward. The original legacy carrier remained intact as a separate recovery route.
+
+Normal `connection_ensure` calls on both computers reused that decision. The selected connection, exact child identities, child records and attempt counts stayed unchanged; cleanup remained clear. Linux's earlier candidate was recorded closed and its exact process was absent. This is actual two-computer managed activation and reuse, not merely an SSH process or listener check. Controlled Linux-origin and Windows-origin reconnection cycles and simultaneous initiation remain separate tests.
+
+The Linux acceptance receipt retains the earlier local attempt's `peer_stopped` error, failed episode and retry hint alongside its healthy committed connection. Those historical diagnostic fields were not cleared by reuse. Current availability, matching committed decisions, authenticated stages and fresh peer checks established the working route; this limitation is not reported as corrected.
+
+A subsequent Windows-to-Linux task ran a native append command over the managed route with exit zero, retained its earlier conversation/context, and reported one marker with a matching file hash. This is completed managed native execution and a baseline for later deduplication checks. The reverse Windows task was refused with `conversation_in_use` before any Windows turn or native command; Bridge did not take over the existing writer. Native task execution in both directions over the managed route is therefore not yet established.
+
+The earlier trial that missed the coordinator's scheduled demand remains recorded: both watchdogs independently restored their exact prior configuration by **20:23:40 UTC**, without a database rewind. The successful follow-up moved the timed retry calls into reviewed owner-local helpers. Neither trial is a test of active network-loss recovery.
+
+### Project, cancellation and waiting-startup evidence
+
+The following project and cancellation checks ran on rc.6 through the **preserved legacy route before managed activation**. They do not substitute for task deduplication across managed reconnection.
+
+| Check | Observed result |
+| --- | --- |
+| Second project and context | Concurrent native commands in two projects overlapped while using distinct workspaces and conversations. A reverse native Windows task passed. A follow-up recalled the correct context and input hash in the same Linux conversation without tools. Looking up a task through the other session was refused. No connector source change or reinstall was needed for the second project. |
+| Selected file | A 262,195-byte binary completed a round trip with identical bytes and SHA-256. Replaying the original transfer request retained the same artifact. |
+| Incomplete transfer cancellation | A 64 MiB transfer was aborted while incomplete. The receiver acknowledged cancellation; staging and destination were absent. Inaccessible file-descriptor directories prevented claiming exhaustive worker absence from that scan. |
+| Native task cancellation | An independent Linux observer saw the exact process alive and then absent well before its natural 180-second deadline. The task was cancelled and its App Server writer released. Earlier inconclusive observations are retained; cross-computer timestamps are not used to claim exact cancellation latency. |
+| Windows waiting startup | An isolated, manually invoked owner-login task stayed ready for 126 seconds with an enabled offline loopback peer. Six samples showed no connection demand/child records; Python subprocess auditing recorded zero SSH launches or adapter executions. Queued work, a saved unacknowledged result and fixture configuration remained unchanged. The temporary task, runner and daemon were removed. |
+
+The Windows startup fixture used a harmless adapter and an explicit bootstrap import for auditing; the other production modules matched the exact rc.6 payload. Its audit covered the isolated Python process tree, not system-wide/native-descendant tracing. No actual Codex turn, owner sign-in or reboot occurred. Exact rc.6 Linux waiting observation remains separate from the earlier isolated service evidence.
+
+**Still pending:** controlled Linux-origin and Windows-origin managed reconnection cycles, simultaneous initiation, bounded offline failures, active-loss recovery, opposite-origin reconnection with native task deduplication, and reverse-direction managed native execution. Exact-source isolated revocation regressions passed; the production pairing was deliberately not revoked. Actual owner sign-in/reboot, fresh two-user onboarding and other platform gaps listed below remain unverified. These observations do not claim completion of the full acceptance matrix or replace immutable candidate/release assets.
 
 ## 0.3.2-rc.5 cleanup correction and receiver evidence
 
@@ -25,7 +59,7 @@ Windows/Python 3.11 verification passed **409 tests: 401 passed and eight platfo
 
 Both exact packaged installers passed isolated upgrade and MCP checks. Linux also passed fresh/repeated installation. All 43 payloads matched between Windows and Linux, shell permissions/line endings were valid, and both installed MCP processes reported rc.5 and 21 tools. Fixture configuration, saved context and results stayed intact; neither package test invoked a real model or changed the live installation.
 
-Published [rc.5](https://github.com/AhmadotEng/codex-bridge/releases/tag/v0.3.2-rc.5) pins revision `6abf2c8c1d18d857dbbb696fe64128db2af4d615`. All seven [Windows, Ubuntu and macOS CI jobs](https://github.com/AhmadotEng/codex-bridge/actions/runs/36178119014) passed. All seven public downloads were independently hash-verified against the accepted candidate. Live rc.5 promotion and managed-connection acceptance remain pending; subsequent evidence updates do not replace those immutable release assets.
+Published [rc.5](https://github.com/AhmadotEng/codex-bridge/releases/tag/v0.3.2-rc.5) pins revision `6abf2c8c1d18d857dbbb696fe64128db2af4d615`. All seven [Windows, Ubuntu and macOS CI jobs](https://github.com/AhmadotEng/codex-bridge/actions/runs/36178119014) passed. All seven public downloads were independently hash-verified against the accepted candidate. The rc.5 live promotion was deferred for the cancellation fixes; both deployments subsequently moved directly from rc.4 to rc.6 as recorded above. rc.5 assets remain immutable, and its checks do not establish managed-connection acceptance.
 
 The following receiver checks were performed separately on the existing rc.4 deployments on September 25, 2026; they do not establish rc.5 managed-connection acceptance.
 
@@ -63,7 +97,7 @@ The initial Windows preservation checker encountered an inherited PowerShell mod
 
 The Linux read-only verifier initially assumed the payload manifest would be installed. The installer intentionally omits that bundle metadata; checking the verified staged manifest and all installed payload hashes corrected the verifier without installation changes. Native proof creation and both report transfers exited successfully. Unprivileged socket inspection could not attribute the legacy listening socket to privileged sshd; separate SSH creation-identity checks and authenticated Bridge traffic established the preserved route.
 
-The Linux service implementation is byte-identical to the accepted rc.3 implementation. The shared CLI readiness changes were separately reviewed and exercised on Linux; the earlier 122-second real user-service test was not repeated. After the live upgrade, rc.4 daemon-only owner-login registration succeeded once through the normal CLI. The exact owned user unit was enabled but stayed inactive with MainPID 0; registration did not start it. Seven post-registration samples spanning 131.588 seconds showed the existing manual daemon and SSH process identities unchanged, no managed connection/demand/child records, and no transport startup enabled. Config, MCP, all 43 source payloads and the Fedora vendor policy were unchanged. Sampling cannot exclude a transient process between observations. This is registration/idle verification; fresh rc.4 user-service activation and actual login/reboot remain unverified.
+The Linux service implementation is byte-identical to the accepted rc.3 implementation. The shared CLI readiness changes were separately reviewed and exercised on Linux; the earlier 122-second real user-service test was not repeated. After the live upgrade, rc.4 daemon-only owner-login registration succeeded once through the normal CLI. The exact owned user unit was enabled but stayed inactive with MainPID 0; registration did not start it. Seven post-registration samples spanning 131.588 seconds showed the existing manual daemon and SSH process identities unchanged, no managed connection/demand/child records, and no transport startup enabled. Config, MCP, all 43 source payloads and the Fedora vendor policy were unchanged. Sampling cannot exclude a transient process between observations. This was registration/idle verification at the rc.4 checkpoint. The later rc.6 live upgrade activated that same owner service, as recorded above; actual login/reboot remains unverified.
 
 These results concern the existing deployments and their preserved legacy route. Managed initiation from both computers, simultaneous initiation, opposite-origin reconnection with task deduplication, and actual sign-in/reboot recovery remain separate pending checks. Published release revision `bf0d8a86a6749828ccdb8b6806e54208fd53fd10` has all 41 functional payload files byte-identical to the accepted candidate; only README and testing documentation changed. All seven [final CI jobs](https://github.com/AhmadotEng/codex-bridge/actions/runs/36166680241) passed and all seven published downloads were independently hash-verified. The release manifest and `SHA256SUMS` identify those immutable assets; subsequent deployment evidence updates these notes without replacing the assets.
 
@@ -109,7 +143,7 @@ This prerelease changes connection management and is **experimental**. Earlier w
 - **Packaged Windows installation:** the extracted ZIP installed into a separate directory, preserved a pre-existing private configuration, matched all 42 payload hashes, and exposed 21 MCP tools while its daemon was absent. The check did not register an MCP server globally or replace the live installation.
 - **Existing deployment migration:** the unwanted legacy transport startup and offline supervisors were stopped while the same daemon, pairing, project scopes, and saved sessions stayed available. Saved legacy routes remain available for a coordinated migration. This did not promote either endpoint to the new protocol.
 
-Linux systemd ownership/rollback is covered with a simulated user manager. Real Linux receiving access, new-protocol Linux tasks, and actual Linux login/reboot observation remain pending. GitHub Actions results are separate per-commit evidence, not a substitute for those deployment checks. Detailed local reports retain source hashes; private key/configuration directories and machine-specific evidence are excluded from release bundles.
+At the rc.1 checkpoint, Linux systemd ownership/rollback had only simulated user-manager coverage, and real Linux receiving access, new-protocol Linux tasks and login/reboot observation were pending. Later sections above record real receiving/service checks; managed Linux task and login/reboot acceptance remain separate gaps. GitHub Actions results are separate per-commit evidence, not a substitute for those deployment checks. Detailed local reports retain source hashes; private key/configuration directories and machine-specific evidence are excluded from release bundles.
 
 Installer checks use only temporary directories: Windows setup and bridge wrappers select installed code even with a shadow `codex_bridge` in the caller's directory, while retaining relative argument semantics. Tests cover incomplete/invalid sources, unrelated destinations, explicit upgrade requirements, byte-preserved matching MCP launchers, conflicting configurations, staged rollback, unchanged private state, and zipapp integrity. The two OS package formats are generated from the same allowlist, compared byte-for-byte against their payload manifest, rebuilt for determinism, and checked for exclusion of unselected private fixture files. These checks do not modify a live account, service, pairing, or route.
 
@@ -208,7 +242,7 @@ The Windows/Python 3.11 run passed **212 isolated tests**, with three POSIX-only
 
 Assess its isolated tests and the CI result for the published commit separately from the deployed repair above. Static preflight does not run a model turn or project command. Unknown runtime layouts remain unverified even if their generated schema is compatible.
 
-## Remaining deployment verification
+## Historical Linux preview evidence
 
 ### Unpublished Linux launcher preview (0.3.2-dev.0)
 
@@ -246,15 +280,15 @@ The older Windows installation and its existing peers, conversations, and routes
 
 TCP port 22 initially timed out. It became reachable after the owner confirmed invitation acceptance and the coordinator refreshed the Tailscale network map. The `ShareeNode:true` status field remained present during success, so that field alone does **not** establish blocked sharing. The successful SSH and authenticated Bridge checks establish reachability; these observations do not isolate the cause of the earlier timeout.
 
-**Still unverified:** a reverse-originated model task from the friend's ordinary Codex, Linux or new-route automatic startup and reboot persistence, and Linux desktop conversation behavior. Linux services and the new Windows route had no automatic startup configured during this check. The successful artifact round trip does not prove a reverse-originated model task. Transfers to the older Windows host remain limited to 8 MiB each. This is one existing mixed-version deployment, not acceptance of a fresh two-user public installation or any game project.
+**At this historical preview checkpoint**, a reverse-originated model task, Linux/new-route startup and reboot persistence, and Linux desktop conversation behavior were unverified. Linux services and the new Windows route had no startup configured, and the older Windows host limited each transfer to 8 MiB. The later rc.6 evidence above supersedes the task-direction and Linux service-activation gaps: native tasks now passed in both directions through the legacy route, and the existing Linux owner service is active. It does not establish managed either-origin connections, actual login/reboot, desktop behavior or fresh two-user installation.
 
-### Deployment checks still required
+## Deployment checks still required
 
 - Two new users completing the public guide with separate accounts and their own SSH connection.
 - Actual two-computer reboot/login acceptance of the integrated 0.3 package.
 - Separate sign-out/sign-in, screen lock/unlock, and sleep/wake cycles; these were not established by the earlier reboot tests.
 - Real authenticated model turns on macOS, broader Linux runtime/sandbox coverage beyond the Fedora check above, and desktop chat behavior on macOS/Linux.
-- Reverse-originated Linux model tasks and Linux/new-route startup and reboot persistence for the preview pairing.
+- The remaining rc.6 managed-connection matrix: controlled Linux-origin and Windows-origin reconnection cycles, simultaneous selection, bounded offline failures, active-loss recovery, opposite-origin reconnection with native task deduplication, and reverse-direction managed native execution. Initial Windows-origin managed activation, reuse and a native Linux task passed; earlier legacy-route project/cancellation tests do not establish managed reconnection behavior. Revocation has exact-source isolated regression coverage; disrupting the production pairing was deliberately excluded.
 - Behavioral testing of additional schema-compatible Codex releases.
 - Desktop notifications and automatic sidebar refresh; neither is promised by Bridge.
 

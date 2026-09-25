@@ -108,7 +108,7 @@ For direct setup/maintenance work beyond a project folder, the local owner can c
 
 ## 5. Enable startup, start now, and verify
 
-On both Windows computers, while signed into the desktop:
+On each Windows computer, while signed into the desktop:
 
 ```powershell
 & $bridge autostart-enable --component daemon
@@ -188,7 +188,7 @@ Use an ordinary local Codex task to choose project permissions and dispatch work
 
 With waiting startup enabled, each owner signs in and Bridge is locally ready. No outgoing SSH attempt occurs until explicit collaboration/connect demand. Use `connection-status` for stage evidence, and `connect` to establish or reuse the selected peer's tunnel. `preflight` inspects runtime and scope separately.
 
-`disconnect --peer ID --request-id UUID` writes durable peer-stop intent; incoming traffic and routine startup cannot clear it. Explicit local connect/retry resumes that peer. `stop` stops the daemon itself. `autostart-disable` changes future startup while preserving running work. Legacy `transport-stop` applies only to a deliberately retained old route; do not mix competing route managers.
+`disconnect --peer ID --request-id UUID` writes durable peer-stop intent; incoming traffic, routine startup and ordinary `connect` cannot clear it. To resume after a deliberate stop or an exhausted connection attempt, explicitly run `connect --peer ID --request-id NEW_UUID --retry`. Use a new request ID for that new retry; if its delivery is uncertain, repeat the same ID and arguments. Ordinary `connect` reuses a healthy tunnel or starts a connection only when the peer is eligible. `stop` stops the daemon itself. `autostart-disable` changes future startup while preserving running work. Legacy `transport-stop` applies only to a deliberately retained old route; do not mix competing route managers.
 
 For another project, repeat `project-select` on both, then create one new session. Installation, pairing, and startup stay the same. Reuse a project's session for follow-up work.
 
