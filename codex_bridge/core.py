@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-VERSION = '0.3.1'
+VERSION = '0.3.2-rc.1'
 MAX_FILE = 8 * 1024 * 1024
 MAX_HTTP = 12 * 1024 * 1024
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted', 'uncertain'}
@@ -135,6 +135,8 @@ class Bridge:
         self.stop_event = asyncio.Event()
         self.server = None
         self.background = None
+        from .connections import ConnectionManager
+        self.connections = ConnectionManager(self)
         # A process death after dispatch cannot prove whether a side effect happened.
         # Preserve uncertainty instead of ever automatically replaying a started turn.
         for task in self.store.all('incoming'):
@@ -206,17 +208,57 @@ class Bridge:
                 return peer_id
         raise BridgeError('unauthorized', 'Bridge credential is invalid or revoked')
 
+    @staticmethod
+    def connection_payload_activity(method):
+        return method not in ('peer.status', 'peer.task_status', 'peer.task_ack', 'peer.session_get') and not method.startswith('peer.connection_')
+
+    def connection_activity(self, peer_id):
+        """Durable work, not polling/heartbeats, keeps a shared peer route in use."""
+        for task in self.store.all('incoming'):
+            if task.get('peer_id') != peer_id:
+                continue
+            if task.get('status') not in TERMINAL:
+                return True
+            if task.get('connection_delivery_tracking') and not self.store.get('task_delivery_acks', task['request_id']):
+                return True
+        for task in self.store.all('outgoing'):
+            if task.get('peer_id') == peer_id and (task.get('status') not in TERMINAL or task.get('result_ack_pending')):
+                return True
+        for item in self.store.all('pending_messages'):
+            if item.get('peer_id') == peer_id and item.get('status') == 'pending':
+                return True
+        for kind in ('artifact_requests', 'artifact_transfers'):
+            for item in self.store.all(kind):
+                if item.get('peer_id', item.get('actor')) == peer_id and item.get('status') not in ('completed', 'aborted', 'expired', 'failed', 'cancelled'):
+                    return True
+        return False
+
     async def remote(self, peer_id, method, params):
+        async with self.connections.route(peer_id, activity=self.connection_payload_activity(method)) as route:
+            return await self.remote_direct(peer_id, method, params, route['url'], route.get('connection'))
+
+    async def remote_direct(self, peer_id, method, params, url, connection=None):
+        """Manager-only candidate transport; never changes request intent content."""
         peer = self.peer(peer_id)
+        if not re.fullmatch(r'http://127\.0\.0\.1:[0-9]{1,5}', url):
+            raise BridgeError('configuration', 'Connection endpoints must be approved loopback addresses')
         def call():
-            data = canonical({'method': method, 'params': params}).encode()
-            req = urllib.request.Request(peer['url'] + '/rpc', data=data,
+            envelope = {'method': method, 'params': params}
+            if connection is not None:
+                envelope['connection'] = connection
+            data = canonical(envelope).encode()
+            req = urllib.request.Request(url + '/rpc', data=data,
                 headers={'Content-Type':'application/json', 'Authorization':'Bearer ' + peer['outgoing_token']}, method='POST')
             # Ignore system HTTP proxies for an SSH loopback endpoint.
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             try:
                 with opener.open(req, timeout=35 if method.startswith('peer.artifact_') else 12) as reply:
                     raw = reply.read(MAX_HTTP + 1)
+            except urllib.error.HTTPError as exc:
+                if exc.code in (401, 403):
+                    raise BridgeError('unauthorized' if exc.code == 401 else 'scope_denied',
+                                      'Remote Bridge rejected the forwarded connection credential or scope') from exc
+                raise BridgeError('peer_http_error', 'Remote Bridge returned HTTP ' + str(exc.code)) from exc
             except (OSError, urllib.error.URLError) as exc:
                 raise BridgeError('peer_unavailable', 'Peer bridge or SSH tunnel is unavailable', True) from exc
             if len(raw) > MAX_HTTP:
@@ -230,25 +272,74 @@ class Bridge:
         self.peer(peer_id)  # Revocation during an in-flight request also takes effect.
         return result
 
-    async def dispatch(self, method, p, actor=None):
+    async def dispatch(self, method, p, actor=None, connection=None):
         if not isinstance(p, dict):
             raise BridgeError('invalid_argument', 'params must be an object')
         if actor is not None:
             self.peer(actor)
+            if method.startswith('peer.connection_'):
+                return await self.connections.peer_rpc(method, p, actor)
             allowed = {'peer.status', 'peer.session_offer', 'peer.session_get', 'peer.context_update',
-                       'peer.task_accept','peer.task_status','peer.task_cancel','peer.message_accept',
+                       'peer.task_accept','peer.task_status','peer.task_ack','peer.task_cancel','peer.message_accept',
                        'peer.artifact_offer','peer.artifact_get','peer.context_sync'}
             from .artifacts import PEER_METHODS
             allowed.update(PEER_METHODS)
             if method not in allowed:
                 raise BridgeError('scope_denied', 'Operation is unavailable through the peer interface')
-            return await self.incoming(method, p, actor)
+            async with self.connections.accept(actor, connection, activity=self.connection_payload_activity(method)):
+                return await self.incoming(method, p, actor)
         if method.startswith('peer.'):
             raise BridgeError('scope_denied', 'Peer operation requires a peer credential')
         fn = getattr(self, 'op_' + method, None)
         if fn is None:
             raise BridgeError('method_not_found', 'Unknown bridge operation')
         return await fn(p)
+
+    async def op_local_status(self, p):
+        return {'peer_id': self.node_id, 'ready': True, 'version': VERSION,
+                'codex': await self.codex_readiness(), 'timestamp': now()}
+
+    async def codex_readiness(self):
+        try:
+            return await self.adapter.capabilities()
+        except BridgeError as exc:
+            return {'ready': False, 'error': exc.as_dict(), 'native_execution': 'not_checked'}
+        except Exception:
+            return {'ready': False, 'error': {'code': 'runtime_unavailable',
+                    'message': 'Inspect the owner-local Codex runtime and sign-in'}, 'native_execution': 'not_checked'}
+
+    async def op_connection_status(self, p):
+        return self.connections.status(p.get('peer_id'))
+
+    async def op_connection_ensure(self, p):
+        peer_id = identifier(p['peer_id'], 'peer_id')
+        if p.get('persistent'):
+            from .autostart import settings
+            enabled = settings(self.config_path).get('transports', {}).get(peer_id, {}).get('enabled')
+            if not enabled:
+                raise BridgeError('scope_denied', 'Persistent connection startup is not enabled for this peer')
+        return await self.ensure_connection_ready(peer_id, identifier(p['request_id'], 'request_id'))
+
+    async def op_connection_retry(self, p):
+        return await self.ensure_connection_ready(identifier(p['peer_id'], 'peer_id'), identifier(p['request_id'], 'request_id'), retry=True)
+
+    async def ensure_connection_ready(self, peer_id, request_id, retry=False):
+        result = await self.connections.ensure(peer_id, request_id, retry=retry)
+        if result.get('legacy'):
+            return result
+        if result.get('available'):
+            try:
+                status = await self.remote(peer_id, 'peer.status', {})
+                if status.get('peer_id') != peer_id:
+                    raise BridgeError('peer_mismatch', 'The remote Bridge has a different peer identity')
+                self.connections.record_codex(peer_id, result=status)
+            except BridgeError as exc:
+                self.connections.record_codex(peer_id, error=exc.as_dict())
+            return self.connections.status(peer_id)
+        return result
+
+    async def op_connection_disconnect(self, p):
+        return await self.connections.disconnect(identifier(p['peer_id'], 'peer_id'), identifier(p['request_id'], 'request_id'))
 
     async def op_peer_status(self, p):
         ids = [p['peer_id']] if p.get('peer_id') else list(self.config().get('peers', {}))
@@ -461,9 +552,11 @@ class Bridge:
                     current.update(remote_status=result, status=result['status'], updated_at=now(),error=None)
             except BridgeError as exc:
                 current.update(error=exc.as_dict(),updated_at=now())
-                if not exc.retryable:
+                if not exc.retryable and exc.code not in ('connection_stopped', 'peer_stopped', 'decision_unresolved', 'stale_generation'):
                     current['status'] = 'failed'
             self.store.put('outgoing',task['request_id'],current)
+            if current.get('remote_status', {}).get('status') in TERMINAL:
+                await self.acknowledge_task_result(self.session(task['session_id']), current, current['remote_status'])
 
     async def op_task_status(self, p):
         session = self.session(p['session_id'])
@@ -481,6 +574,7 @@ class Bridge:
                     return outgoing
                 outgoing.update(status=result['status'],remote_status=result,updated_at=now(),error=None)
                 self.store.put('outgoing',request_id,outgoing)
+                await self.acknowledge_task_result(session, outgoing, result)
                 return result
             except BridgeError as exc:
                 outgoing = self.store.get('outgoing',request_id)
@@ -489,6 +583,27 @@ class Bridge:
         if incoming and incoming['session_id'] == session['session_id']:
             return incoming
         raise BridgeError('task_not_found','No task with this ID in this session')
+
+    @staticmethod
+    def task_result_digest(task):
+        return digest({key: task.get(key) for key in ('status', 'result', 'error', 'thread_id', 'turn_id')})
+
+    async def acknowledge_task_result(self, session, outgoing, result):
+        if result.get('status') not in TERMINAL or not result.get('connection_delivery_tracking') or not self.connections.configured(session['peer_id']):
+            return
+        # Persist reception before acknowledging: a lost acknowledgment can be
+        # retried, while the remote retains the complete result until then.
+        outgoing['result_ack_pending'] = True
+        self.store.put('outgoing', outgoing['request_id'], outgoing)
+        try:
+            await self.remote(session['peer_id'], 'peer.task_ack', {
+                'session_id': session['session_id'], 'request_id': outgoing['request_id'],
+                'result_digest': self.task_result_digest(result)})
+        except BridgeError:
+            return
+        outgoing['result_ack_pending'] = False
+        self.store.put('outgoing', outgoing['request_id'], outgoing)
+        self.connections.record_progress(session['peer_id'])
 
     async def op_task_wait(self, p):
         seconds = max(1,min(30,float(p.get('timeout_seconds',20))))
@@ -515,6 +630,7 @@ class Bridge:
                     outgoing.update(status='cancel_pending',error=exc.as_dict(),updated_at=now())
                     result = outgoing
             self.store.put('outgoing',p['request_id'],outgoing)
+            await self.acknowledge_task_result(session, outgoing, result)
             return result
         return await self.cancel_local(session,p['request_id'])
 
@@ -547,10 +663,23 @@ class Bridge:
         previous, fingerprint = self.mutation(p['request_id'],'message_out',p)
         if previous:
             return previous['result']
-        if p.get('continue_conversation',False) and session['coordinator_id']==self.node_id:
-            await self.remote(session['peer_id'],'peer.context_sync',{
-                k:session[k] for k in ('session_id','context','goal','responsibilities','revision')})
-        result = await self.remote(session['peer_id'],'peer.message_accept',p)
+        pending = self.store.get('pending_messages', p['request_id'])
+        if pending and pending['digest'] != fingerprint:
+            raise BridgeError('duplicate_conflict', 'Message request ID was used for different content')
+        self.store.put('pending_messages', p['request_id'], {'peer_id': session['peer_id'],
+            'session_id': session['session_id'], 'digest': fingerprint, 'request': p,
+            'status': 'pending', 'updated_at': now()})
+        try:
+            if p.get('continue_conversation',False) and session['coordinator_id']==self.node_id:
+                await self.remote(session['peer_id'],'peer.context_sync',{
+                    k:session[k] for k in ('session_id','context','goal','responsibilities','revision')})
+            result = await self.remote(session['peer_id'],'peer.message_accept',p)
+        except BridgeError as exc:
+            if not exc.retryable and exc.code not in ('connection_stopped','peer_stopped'):
+                saved = self.store.get('pending_messages', p['request_id'])
+                saved.update(status='failed', error=exc.as_dict(), updated_at=now())
+                self.store.put('pending_messages', p['request_id'], saved)
+            raise
         self.store.put('messages',p['request_id'],result['message'])
         if p.get('continue_conversation',False):
             intent={'session_id':p['session_id'],'prompt':p['text']}
@@ -558,6 +687,8 @@ class Bridge:
                 'peer_id':session['peer_id'],'direction':'outgoing','intent_digest':digest(intent),
                 'status':result['task']['status'],'remote_status':result['task'],'created_at':now(),'updated_at':now()})
         self.store.put('mutations',p['request_id'],{'digest':fingerprint,'result':result})
+        self.store.put('pending_messages', p['request_id'], {'peer_id': session['peer_id'],
+            'digest': fingerprint, 'status': 'delivered', 'updated_at': now()})
         return result
 
     def file_payload(self, session, relative):
@@ -667,8 +798,8 @@ class Bridge:
             return await self.artifact_transfers.incoming(method, p, actor)
         if method=='peer.status':
             return {'peer_id':self.node_id,'version':VERSION,'protocol':1,'available':True,
-                'codex':await self.adapter.capabilities(),
-                'capabilities':['sessions','tasks','retained_context','messages','artifacts_sha256','cancel','durable_dedup',CAPABILITY],
+                'codex':await self.codex_readiness(),
+                'capabilities':['sessions','tasks','retained_context','messages','artifacts_sha256','cancel','durable_dedup',CAPABILITY,'on_demand_tunnel_v1'],
                 'artifact_transfer':self.artifact_transfers.capabilities(),
                 'projects':[{'project_id':pid,'name':proj.get('name',pid),'allowed_ops':proj['allowed_ops']}
                     for pid,proj in self.config().get('projects',{}).items() if actor in proj.get('allowed_peers',[])]}
@@ -710,6 +841,15 @@ class Bridge:
             if not task or task['session_id']!=session['session_id']:
                 raise BridgeError('task_not_found','Task does not belong to this session')
             return task
+        if method=='peer.task_ack':
+            task = self.store.get('incoming', identifier(p['request_id'], 'request_id'))
+            if not task or task['session_id'] != session['session_id'] or task.get('peer_id') != actor:
+                raise BridgeError('task_not_found', 'Task does not belong to this session')
+            if task['status'] not in TERMINAL or p.get('result_digest') != self.task_result_digest(task):
+                raise BridgeError('result_changed', 'Only the durably received terminal result can be acknowledged', True)
+            self.store.put('task_delivery_acks', task['request_id'], {'peer_id': actor,
+                'session_id': session['session_id'], 'result_digest': p['result_digest'], 'timestamp': now()})
+            return {'acknowledged': True, 'request_id': task['request_id']}
         if method=='peer.task_cancel':
             return await self.cancel_local(session,p['request_id'])
         if method=='peer.message_accept':
@@ -766,7 +906,8 @@ class Bridge:
         if sum(t['status'] not in TERMINAL for t in self.store.all('incoming'))>=32:
             raise BridgeError('queue_full','This computer already has 32 unfinished requests',True)
         task={'request_id':request_id,'session_id':session['session_id'],'peer_id':actor,'direction':'incoming',
-            'prompt':prompt,'intent_digest':fingerprint,'status':'queued','created_at':now(),'updated_at':now(),'progress':[]}
+            'prompt':prompt,'intent_digest':fingerprint,'status':'queued','created_at':now(),'updated_at':now(),'progress':[],
+            'connection_delivery_tracking': self.connections.configured(actor)}
         cancelled=self.store.get('cancellations',request_id)
         if cancelled:
             if cancelled['session_id']!=session['session_id'] or cancelled['peer_id']!=actor:
@@ -890,7 +1031,14 @@ class Bridge:
 
     async def maintenance(self):
         while not self.stop_event.is_set():
+            await self.connections.maintenance()
             self.artifact_transfers.cleanup()
+            for message in self.store.all('pending_messages'):
+                if message.get('status') == 'pending':
+                    try:
+                        await self.op_message_send(message['request'])
+                    except BridgeError:
+                        pass
             for task in self.store.all('incoming'):
                 if task['status']=='queued': self.schedule(task)
                 elif task['status'] in ('running','starting','cancel_requested'):
@@ -899,6 +1047,11 @@ class Bridge:
                         await self.cancel_local(self.store.get('sessions',task['session_id']),task['request_id'])
             for task in self.store.all('outgoing'):
                 if task['status']=='pending_delivery': await self.deliver(task)
+                elif task.get('result_ack_pending') and task.get('remote_status'):
+                    try:
+                        await self.acknowledge_task_result(self.session(task['session_id']), task, task['remote_status'])
+                    except BridgeError:
+                        pass
                 elif task['status']=='cancel_pending':
                     try: await self.op_task_cancel(task)
                     except BridgeError as exc:
@@ -927,7 +1080,7 @@ class Bridge:
             authorization=headers.get('authorization','')
             actor=self.authenticate(authorization.removeprefix('Bearer ') if authorization.startswith('Bearer ') else '')
             body=json.loads(await asyncio.wait_for(reader.readexactly(size),35))
-            result=await self.dispatch(body['method'],body.get('params',{}),actor)
+            result=await self.dispatch(body['method'],body.get('params',{}),actor,body.get('connection'))
             response={'ok':True,'result':result,'request_id':request_id,'timestamp':now()}
         except BridgeError as exc:
             response={'ok':False,'error':exc.as_dict(),'request_id':request_id,'timestamp':now()}
@@ -946,7 +1099,8 @@ class Bridge:
             except (OSError,ConnectionError): pass
 
     async def serve(self):
-        await self.adapter.start()
+        # Waiting and connection control stay available even if the local Codex
+        # runtime needs owner attention. Runtime methods perform their own start.
         self.server=await asyncio.start_server(self.handle_http,'127.0.0.1',self.config()['listen_port'],limit=16384)
         self.background=asyncio.create_task(self.maintenance())
         print(canonical({'event':'bridge_ready','peer_id':self.node_id,'port':self.config()['listen_port'],'timestamp':now()}),flush=True)
@@ -963,5 +1117,6 @@ class Bridge:
                     except Exception: pass
             await self.adapter.close()
             await self.artifact_transfers.close()
+            await self.connections.close()
             await asyncio.gather(*list(self.running.values()),return_exceptions=True)
             self.store.db.close()

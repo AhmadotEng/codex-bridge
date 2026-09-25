@@ -18,6 +18,7 @@ from codex_bridge.core import BridgeError
 
 class StartupTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(mock.patch.object(autostart, '_uses_windows', return_value=True))
         self.temporary = tempfile.TemporaryDirectory(prefix='codex-bridge-startup-')
         self.root = Path(self.temporary.name).resolve()
         self.state = self.root / 'state'
@@ -49,21 +50,24 @@ class StartupTests(unittest.TestCase):
         self.assertFalse(result['started_now'])
         for fragment in ['-AtLogOn -User $identity.Name', '-LogonType Interactive -RunLevel Limited', '-Hidden', '-MultipleInstances IgnoreNew', '-ExecutionTimeLimit ([TimeSpan]::Zero)', '-RestartCount 3', '-AllowStartIfOnBatteries', '-DontStopIfGoingOnBatteries']:
             self.assertIn(fragment, script)
-        for forbidden in ['-Password', '-RunLevel Highest', 'Start-ScheduledTask', 'Unregister-ScheduledTask']:
+        for forbidden in ['-Password', '-RunLevel Highest', 'Start-ScheduledTask']:
             self.assertNotIn(forbidden, script)
+        self.assertIn('Export-ScheduledTask', script)
+        self.assertIn('Register-ScheduledTask -TaskName $previous.Name -Xml $previous.Xml', script)
         for policy in ['$owner -ne $identity.User.Value', "$task.Principal.LogonType -ne 'Interactive'", "$task.Principal.RunLevel -ne 'Limited'", '$ownerTriggers.Count -ne 1']:
             self.assertIn(policy, script)
         self.assertTrue(autostart.enabled(self.path, 'daemon'))
         self.parser_check(script)
 
-    def test_auto_selection_uses_config_not_computer_or_project_names(self):
+    def test_auto_waits_even_when_enabled_peer_transports_exist(self):
         self.cfg['peers'] = {'peer-one': {'enabled': True}}
         self.cfg['ssh_transports'] = {'peer-one': {'enabled': True}}
         self.path.write_text(json.dumps(self.cfg), encoding='utf-8')
         with mock.patch.object(autostart, '_windows'), mock.patch.object(autostart, '_pythonw', return_value=Path(sys.executable)), mock.patch('codex_bridge.transport.transport_args') as validate, mock.patch.object(cli, 'powershell'):
             result = autostart.enable(self.path)
-        self.assertEqual(result['enabled_components'], [{'component': 'daemon', 'peer_id': None}, {'component': 'transport', 'peer_id': 'peer-one'}])
-        validate.assert_called_once()
+        self.assertEqual(result['enabled_components'], [{'component': 'daemon', 'peer_id': None}])
+        validate.assert_not_called()
+        self.assertFalse(autostart.enabled(self.path, 'transport', 'peer-one'))
 
     def test_transport_startup_rejects_disabled_transport(self):
         with mock.patch.object(autostart, '_windows'), mock.patch.object(cli, 'powershell') as ps:
@@ -79,7 +83,7 @@ class StartupTests(unittest.TestCase):
                 self.assertFalse(result['running_work_stopped'])
                 self.assertIn('Disable-ScheduledTask', ps.call_args.args[0])
                 self.assertNotIn('Stop-ScheduledTask', ps.call_args.args[0])
-                self.assertNotIn('Unregister-ScheduledTask', ps.call_args.args[0])
+                self.assertNotIn('Unregister-ScheduledTask -TaskName ' + cli.ps_literal(autostart.task_name(self.path, 'daemon')), ps.call_args.args[0])
                 with self.assertRaises(BridgeError) as caught:
                     autostart.disable(self.path, 'daemon', remove=True)
                 self.assertEqual(caught.exception.code, 'component_running')
@@ -127,11 +131,11 @@ class StartupTests(unittest.TestCase):
             supervisor.assert_called_once()
         self.assertFalse(autostart.stop_path(self.path, 'daemon').exists())
 
-    def test_auto_enable_snapshots_peer_scope_without_enabling_future_peers(self):
+    def test_explicit_persistent_enable_snapshots_only_selected_peer(self):
         self.cfg.update(peers={'first-peer': {'enabled': True}}, ssh_transports={'first-peer': {'enabled': True}})
         self.path.write_text(json.dumps(self.cfg))
         with mock.patch.object(autostart, '_windows'), mock.patch.object(autostart, '_pythonw', return_value=Path(sys.executable)), mock.patch('codex_bridge.transport.transport_args'), mock.patch.object(cli, 'powershell'):
-            autostart.enable(self.path)
+            autostart.enable(self.path, 'transport', 'first-peer')
         self.cfg['peers']['later-peer'] = {'enabled': True}
         self.cfg['ssh_transports']['later-peer'] = {'enabled': True}
         self.path.write_text(json.dumps(self.cfg))
@@ -141,6 +145,45 @@ class StartupTests(unittest.TestCase):
         args = autostart.settings(self.path)['transports']['first-peer']['arguments']
         self.assertIn('--peer first-peer', args)
         self.assertNotIn('later-peer', args)
+
+    def test_persistent_startup_never_infers_all_peers(self):
+        self.cfg.update(peers={'first-peer': {'enabled': True}}, ssh_transports={'first-peer': {'enabled': True}})
+        self.path.write_text(json.dumps(self.cfg))
+        for component in ('transport', 'all'):
+            with mock.patch.object(autostart, '_windows'), self.assertRaises(BridgeError) as caught:
+                autostart.enable(self.path, component)
+            self.assertEqual(caught.exception.code, 'persistent_peer_required')
+
+    def test_persistent_runner_uses_single_durable_manager_demand_without_process(self):
+        with mock.patch.object(cli, 'call', return_value={'ok': True, 'result': {}}) as call, mock.patch.object(processes, 'OwnedProcess') as process:
+            self.assertEqual(autostart.supervise(self.path, 'transport', io.StringIO(), 'selected'), 0)
+            first = call.call_args.args[2]
+            self.assertEqual(autostart.supervise(self.path, 'transport', io.StringIO(), 'selected'), 0)
+            self.assertEqual(first, call.call_args.args[2])
+        process.assert_not_called()
+        self.assertEqual(first['peer_id'], 'selected')
+        self.assertTrue(first['persistent'])
+        self.assertNotIn('retry', first)
+        self.assertEqual(call.call_args.args[1], 'connection_ensure')
+
+    def test_persistent_task_has_no_scheduler_retry_and_never_clears_stop(self):
+        self.cfg.update(peers={'one': {'enabled': True}}, ssh_transports={'one': {'enabled': True}})
+        self.path.write_text(json.dumps(self.cfg))
+        with mock.patch.object(autostart, '_windows'), mock.patch.object(autostart, '_pythonw', return_value=Path(sys.executable)), mock.patch('codex_bridge.transport.transport_args'), mock.patch.object(cli, 'powershell') as ps:
+            autostart.enable(self.path, 'transport', 'one')
+        self.assertNotIn('-RestartCount', ps.call_args.args[0])
+        marker = autostart.stop_path(self.path, 'transport', 'one')
+        cli.save(marker, {'login_identity': 'old-login'})
+        with mock.patch.object(processes, 'login_identity', return_value='new-login'), mock.patch.object(autostart, 'supervise') as supervise:
+            self.assertEqual(autostart.run(self.path, 'transport', 'one'), 0)
+        supervise.assert_not_called()
+        self.assertTrue(marker.exists())
+
+    def test_persistent_runner_respects_stopped_local_daemon(self):
+        autostart.stop_path(self.path, 'daemon').touch()
+        with mock.patch.object(cli, 'call') as call, mock.patch.object(cli, 'start_daemon') as start:
+            self.assertEqual(autostart.supervise(self.path, 'transport', io.StringIO(), 'one'), 0)
+        call.assert_not_called(); start.assert_not_called()
 
     def test_peer_disable_preserves_other_registrations_and_running_component(self):
         cli.save(self.state/'autostart.json', {'version': 2, 'components': {}, 'transports': {'one': {'enabled': True}, 'two': {'enabled': True}}})

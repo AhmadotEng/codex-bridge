@@ -6,7 +6,8 @@ param(
     [string]$InstallDirectory = (Join-Path $env:USERPROFILE 'plugins\codex-bridge'),
     [string]$ConfigPath = (Join-Path $env:USERPROFILE '.codex-bridge\config.json'),
     [switch]$Batch,
-    [switch]$SkipRegistration
+    [switch]$SkipRegistration,
+    [switch]$Upgrade
 )
 $ErrorActionPreference = 'Stop'
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -24,10 +25,10 @@ if (-not $PythonExe) {
         throw 'Python 3.11+ was not found. Install it locally, or run setup.ps1 -PythonExe with its full executable path.'
     }
 }
-$installationText = & (Join-Path $sourceRoot 'scripts\install.ps1') -PythonExe $PythonExe -InstallDirectory $InstallDirectory -ConfigPath $ConfigPath
+$installationText = & (Join-Path $sourceRoot 'scripts\install.ps1') -PythonExe $PythonExe -InstallDirectory $InstallDirectory -ConfigPath $ConfigPath -Upgrade:$Upgrade
 if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw 'Connector installation failed.' }
 $installation = $installationText | ConvertFrom-Json
-$arguments = @('-m', 'codex_bridge.cli', '--config', [string]$installation.config_path, 'setup')
+$arguments = @('-I', (Join-Path ([string]$installation.installed_directory) 'scripts\run_bridge.py'), '--config', [string]$installation.config_path, 'setup')
 if ($CodexExe) { $arguments += @('--codex', $CodexExe) }
 if ($PeerId) { $arguments += @('--peer-id', $PeerId) }
 if ($Batch) { $arguments += '--batch' }

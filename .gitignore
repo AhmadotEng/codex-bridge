@@ -46,6 +46,9 @@ bridge-import/
 *.db
 *.db-*
 *.zip
+*.tar.gz
+*.pyz
+*.pyz.sha256
 *.apk
 *.obb
 /THIS-PAIR.md

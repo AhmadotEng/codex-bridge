@@ -38,8 +38,8 @@ class MCPProtocolTests(unittest.TestCase):
         result = self.server.handle(request("initialize", {"protocolVersion": "2025-03-26"}))["result"]
         self.assertEqual(result["protocolVersion"], "2025-03-26")
         listed = self.server.handle(request("tools/list"))["result"]["tools"]
-        self.assertEqual(len(listed), 16)
-        self.assertEqual(len({tool["name"] for tool in listed}), 16)
+        self.assertEqual(len(listed), 21)
+        self.assertEqual(len({tool["name"] for tool in listed}), 21)
         self.assertTrue(all(tool["inputSchema"]["additionalProperties"] is False for tool in listed))
         self.assertEqual(self.client.calls, [])
 
@@ -83,7 +83,7 @@ class MCPProtocolTests(unittest.TestCase):
         self.assertEqual(self.client.calls, [])
 
     def test_readonly_annotations_do_not_mark_mutations_readonly(self):
-        readonly = {"bridge_status", "session_chat", "peer_status", "session_list", "session_get", "task_status", "task_wait", "artifact_transfer_status"}
+        readonly = {"local_status", "connection_status", "bridge_status", "session_chat", "peer_status", "session_list", "session_get", "task_status", "task_wait", "artifact_transfer_status"}
         for tool in TOOLS:
             self.assertEqual(tool["annotations"]["readOnlyHint"], tool["name"] in readonly)
 
@@ -176,7 +176,7 @@ class LocalHTTPTests(unittest.TestCase):
     def test_missing_config_does_not_prevent_tool_discovery(self):
         self.config.unlink()
         server = MCPServer(LocalBridgeClient(self.config))
-        self.assertEqual(len(server.handle(request("tools/list"))["result"]["tools"]), 16)
+        self.assertEqual(len(server.handle(request("tools/list"))["result"]["tools"]), 21)
         result = server.handle(request("tools/call", {"name": "peer_status"}))["result"]
         self.assertTrue(result["isError"])
         self.assertEqual(result["structuredContent"]["error"]["code"], "configuration_error")

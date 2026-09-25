@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import errno
 from contextlib import contextmanager
 import hashlib
 import json
@@ -135,6 +136,11 @@ def call(path,method,params=None,timeout=40):
         return json.load(reply)
 
 
+def connection_refused(exc):
+    reason=getattr(exc,'reason',exc)
+    return isinstance(reason,ConnectionRefusedError) or getattr(reason,'errno',None) in (errno.ECONNREFUSED,10061)
+
+
 def launch(path,mode):
     cfg=read_config(path)
     state=Path(cfg['state_dir'])
@@ -223,7 +229,7 @@ def wait_for_exit(pid_file,seconds=15):
     return not record_status(pid_file,pid_lock_path(pid_file))['running']
 
 
-def _start_daemon(path,interactive=None):
+def _start_daemon(path,interactive=None,resume=True):
     from . import autostart
     cfg=read_config(path)
     if interactive is not None:
@@ -231,6 +237,8 @@ def _start_daemon(path,interactive=None):
         cfg['launch_mode']='interactive' if interactive else 'background'
         save(path,cfg)
     if autostart.stop_path(path,'daemon').exists():
+        if not resume:
+            raise BridgeError('daemon_stopped','The owner stopped the local daemon. Use start or an explicit connection retry to resume.')
         if record_status(Path(cfg['state_dir'])/'serve.pid.json',Path(cfg['state_dir'])/'serve.lock')['running'] or record_status(autostart.runner_record(path,'daemon'),autostart.runner_lock(path,'daemon'))['running']:
             raise BridgeError('still_stopping','The previous daemon is still stopping; retry after it exits')
         autostart.clear_stop(path,'daemon')
@@ -238,8 +246,9 @@ def _start_daemon(path,interactive=None):
         # This probe must never wait for peers or SSH; a healthy offline bridge is running.
         existing=valid_response(call(path,'session_list',{},timeout=2))
         return {'already_running':True,'launch_mode':cfg.get('launch_mode','background'),'status':existing}
-    except OSError:
-        pass
+    except OSError as exc:
+        if not connection_refused(exc):
+            raise BridgeError('local_endpoint_unverified','A local listener did not prove readiness; no second daemon was launched') from exc
     mode=cfg.get('launch_mode','background')
     if mode not in ('background','interactive'): raise BridgeError('configuration','launch_mode must be background or interactive')
     process=None
@@ -287,20 +296,21 @@ def daemon_control(path):
     finally: manager.__exit__(None,None,None)
 
 
-def start_daemon(path,interactive=None):
+def start_daemon(path,interactive=None,resume=True):
     from . import autostart
     if autostart.stop_path(path,'daemon').exists():
         state=Path(read_config(path)['state_dir'])
         if not wait_for_exit(state/'serve.pid.json',seconds=15) or not wait_for_exit(autostart.runner_record(path,'daemon'),seconds=5):
             raise BridgeError('still_stopping','The previous daemon is still stopping; retry after it exits')
     with daemon_control(path):
-        result=_start_daemon(path,interactive)
+        result=_start_daemon(path,interactive,resume=resume)
     # A login runner needs the same control lock for its marker check. Release
     # it before waiting for readiness; keep every marker mutation serialized.
     return _wait_daemon_ready(path,*result) if isinstance(result,tuple) else result
 
 
 def transport_args(cfg):
+    from .transport import quote_ssh_option
     t=cfg['ssh_transport']
     if not isinstance(t,dict): raise BridgeError('configuration','ssh_transport must be an object')
     ssh=t.get('ssh_exe') or shutil.which('ssh')
@@ -320,7 +330,7 @@ def transport_args(cfg):
         raise BridgeError('configuration','remote_peer_port must differ from the remote daemon port')
     args=[ssh,'-F','none','-N','-T','-p',str(t['ssh_port']),'-l',t['username'],'-i',t['identity_file'],
         '-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes','-o','BatchMode=yes',
-        '-o','UserKnownHostsFile='+t['known_hosts_file'],'-o','HostKeyAlias='+t['host_key_alias'],
+        '-o','UserKnownHostsFile='+quote_ssh_option(t['known_hosts_file']),'-o','HostKeyAlias='+t['host_key_alias'],
         '-o','ExitOnForwardFailure=yes','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=3',
         '-o','ConnectTimeout=10',
         '-L',f"127.0.0.1:{t['local_peer_port']}:127.0.0.1:{t['remote_bridge_port']}",
@@ -456,6 +466,16 @@ def main(argv=None):
     launch_mode.add_argument('--background',action='store_true',help='Persist normal detached process launch mode')
     for name in ('serve','stop','status','diagnostics'):
         sub.add_parser(name)
+    connection_status=sub.add_parser('connection-status',help='Inspect recorded connection stages without dialing')
+    connection_status.add_argument('--peer')
+    connect=sub.add_parser('connect',help='Start the local daemon if needed and establish or reuse one peer connection')
+    connect.add_argument('--peer',required=True); connect.add_argument('--request-id',required=True)
+    connect.add_argument('--retry',action='store_true',help='Explicitly resume a stopped connection or start a fresh bounded retry episode')
+    disconnect=sub.add_parser('disconnect',help='Deliberately stop one managed pair; preserves other peers')
+    disconnect.add_argument('--peer',required=True); disconnect.add_argument('--request-id',required=True)
+    lanes=sub.add_parser('connection-config',help='Approve the shared two-origin loopback lane map locally; never dials or configures SSH access')
+    lanes.add_argument('--peer',required=True); lanes.add_argument('--lanes-file',type=Path,required=True)
+    lanes.add_argument('--idle-seconds',type=int,default=900)
     enable=sub.add_parser('autostart-enable',help='Register hidden owner-login tasks without starting work now')
     enable.add_argument('--component',choices=['daemon','transport','auto','all'],default='auto'); enable.add_argument('--peer')
     disable=sub.add_parser('autostart-disable',help='Disable future login startup without stopping active work')
@@ -554,6 +574,29 @@ def main(argv=None):
             return 0
         elif args.command=='start':
             result=start_daemon(path,True if args.interactive else False if args.background else None)
+        elif args.command in ('connect','disconnect','connection-status'):
+            from .mcp import LocalBridgeClient
+            params={'peer_id':args.peer} if args.peer else {}
+            if args.command != 'connection-status': params['request_id']=args.request_id
+            if args.command=='connect': method='connection_retry' if args.retry else 'connection_ensure'
+            else: method='connection_disconnect' if args.command=='disconnect' else 'connection_status'
+            result=LocalBridgeClient(path).call(method,params)
+        elif args.command=='connection-config':
+            from .connections import validate_connections
+            cfg=read_config(path); peer=identifier(args.peer)
+            try:
+                status=valid_response(call(path,'connection_status',{'peer_id':peer},timeout=2))['result']
+                if status.get('available') or status.get('state') in ('connecting','draining'):
+                    raise BridgeError('connection_busy','Stop the selected managed connection before changing its approved lane map')
+            except OSError:
+                pass
+            entry={'mode':'on_demand','lanes':read(args.lanes_file),'idle_seconds':args.idle_seconds,
+                   'initial_attempts':2,'initial_seconds':45,'recovery_attempts':3,'recovery_seconds':120,'persistent':False}
+            cfg.setdefault('connections',{})[peer]=entry
+            validate_connections(cfg)
+            save(path,cfg)
+            result={'peer_id':peer,'configured':True,'connection':entry,'connected':False,
+                    'next_step':'Approve the identical lane map and authorized receiving SSH forwarding on the paired computer before connect.'}
         elif args.command=='stop':
             from . import autostart
             cfg=read_config(path)
@@ -599,7 +642,7 @@ def main(argv=None):
         print(json.dumps(result,indent=2,ensure_ascii=False))
         return 1 if isinstance(result,dict) and result.get('ok') is False else 0
     except Exception as exc:
-        safe_commands={'setup','pair-setup','project-select','transport-config','preflight','show-chat','status','transport-status','autostart-status','autostart-enable','autostart-disable'}
+        safe_commands={'setup','pair-setup','project-select','transport-config','preflight','show-chat','status','transport-status','autostart-status','autostart-enable','autostart-disable','connect','disconnect','connection-status','connection-config'}
         if args.command in safe_commands and not isinstance(exc,BridgeError):
             error={'code':'local_check_failed','message':'The local operation could not complete. Verify the selected files and configuration, then run setup or preflight.', 'retryable':False}
         else:

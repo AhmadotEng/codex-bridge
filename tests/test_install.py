@@ -7,33 +7,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import importlib.util
 
 
 SOURCE = Path(__file__).resolve().parents[1]
 POWERSHELL = shutil.which('powershell.exe') or shutil.which('pwsh')
-RUNTIME_FILES = (
-    '.codex-plugin/plugin.json',
-    'codex_bridge/__init__.py',
-    'codex_bridge/artifacts.py',
-    'codex_bridge/autostart.py',
-    'codex_bridge/cli.py',
-    'codex_bridge/codex_adapter.py',
-    'codex_bridge/compatibility.py',
-    'codex_bridge/core.py',
-    'codex_bridge/local_actions.py',
-    'codex_bridge/mcp.py',
-    'codex_bridge/onboarding.py',
-    'codex_bridge/processes.py',
-    'codex_bridge/tools.py',
-    'codex_bridge/transport.py',
-    'scripts/bridge.ps1',
-    'scripts/install.ps1',
-    'scripts/setup.ps1',
-    'scripts/bridge.sh',
-    'scripts/install.py',
-    'scripts/install.sh',
-    'skills/collaborate/SKILL.md',
-)
+_spec = importlib.util.spec_from_file_location('test_installer_allowlist', SOURCE/'scripts'/'install.py')
+_installer = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_installer)
+RUNTIME_FILES = _installer.REQUIRED
 
 
 @unittest.skipUnless(os.name == 'nt' and POWERSHELL, 'Windows PowerShell installer')
@@ -106,6 +87,8 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.config.read_text(encoding='utf-8'), 'existing private configuration')
 
     def test_existing_destination_private_files_are_preserved(self):
+        first = self.install()
+        self.assertEqual(first.returncode, 0, first.stderr)
         private = self.target / 'state' / 'existing.json'
         private.parent.mkdir(parents=True)
         private.write_text('preserve existing state', encoding='utf-8')

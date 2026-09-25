@@ -33,6 +33,11 @@ def _tool(name: str, description: str, properties: dict, required: list[str], *,
 
 
 TOOLS = [
+    _tool("local_status", "Inspect local daemon and Codex readiness. This never starts the daemon or connects to peers.", {}, [], readonly=True),
+    _tool("connection_status", "Inspect recorded connection stages without dialing. A listening port or SSH process alone is not a verified connection.", {"peer_id": _string("Optional configured peer identifier.", 128)}, [], readonly=True),
+    _tool("connection_ensure", "Start the local waiting daemon if needed, then establish or reuse this peer's authenticated bidirectional tunnel within a bounded attempt budget. Deliberate stops require connection_retry. Preserve the UUID request ID after timeouts.", {"peer_id": _string("Configured paired computer identifier.", 128), "request_id": REQUEST}, ["peer_id", "request_id"]),
+    _tool("connection_retry", "Explicit owner-requested retry or resume after an offline failure or deliberate stop. Starts a new bounded attempt episode. Do not call automatically from status polling or task retries.", {"peer_id": _string("Configured paired computer identifier.", 128), "request_id": REQUEST}, ["peer_id", "request_id"]),
+    _tool("connection_disconnect", "Deliberately stop this managed pair and suppress incoming/outgoing reconnection until a local explicit retry. Active work prevents an unsafe disconnect; other pairs remain untouched.", {"peer_id": _string("Configured paired computer identifier.", 128), "request_id": REQUEST}, ["peer_id", "request_id"], destructive=True),
     _tool("bridge_status", "Show safe local collaboration status and observed chat ownership without prompts, logs, tokens, or workspace paths.", {}, [], readonly=True),
     _tool("session_chat", "Find this computer's project chat link and observed ownership state. This does not start a turn or take over a desktop-owned chat. Open the returned link on this computer only.", {"session_id": SESSION}, ["session_id"], readonly=True),
     _tool("peer_status", "Discover paired computers, current availability, and bridge capabilities. Pairing is configured locally outside these tools.", {"peer_id": _string("Optional configured peer identifier.", 128)}, [], readonly=True),

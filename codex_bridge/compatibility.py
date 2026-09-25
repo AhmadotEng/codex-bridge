@@ -9,6 +9,7 @@ Runtime policy and ownership checks remain in the adapter.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -229,7 +230,7 @@ def validate_schema_bundle(directory: str | Path, *, enable_local_actions: bool 
     common = {"cwd": workspace, "approvalPolicy": "never", "approvalsReviewer": "user",
               "sandbox": "read-only", "config": {}, "developerInstructions": "Scoped project task"}
     samples = {
-        "initialize": {"clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.3.1"}, "capabilities": {"experimentalApi": enable_local_actions}},
+        "initialize": {"clientInfo": {"name": "codex_bridge", "title": "Codex Bridge", "version": "0.3.2-rc.1"}, "capabilities": {"experimentalApi": enable_local_actions}},
         "thread/start": {**common, "ephemeral": False},
         "thread/resume": {**common, "threadId": "bridge-thread", "excludeTurns": True},
         "thread/name/set": {"threadId": "bridge-thread", "name": "Bridge: Example"},
@@ -292,8 +293,11 @@ def inspect_runtime(codex_path: str | Path, *, timeout: float = 30, enable_local
               "runtime_bundle": inspect_runtime_bundle(codex_path, None),
               "native_tool_execution": "not_checked"}
     kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    launching = False
     try:
+        launching = True
         version = subprocess.run([str(codex_path), "--version"], capture_output=True, timeout=timeout, **kwargs)
+        launching = False
         match = re.fullmatch(rb"codex-cli (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\s*", version.stdout)
         if version.returncode or not match:
             raise SchemaMismatch("Configured executable did not report a Codex CLI version")
@@ -307,7 +311,9 @@ def inspect_runtime(codex_path: str | Path, *, timeout: float = 30, enable_local
             args = [str(codex_path), "app-server", "generate-json-schema", "--out", directory]
             if enable_local_actions:
                 args.append("--experimental")
+            launching = True
             generated = subprocess.run(args, capture_output=True, timeout=timeout, **kwargs)
+            launching = False
             if generated.returncode:
                 raise SchemaMismatch("Codex could not generate its App Server schema; update Codex or select another local executable")
             schema = validate_schema_bundle(directory, enable_local_actions=enable_local_actions)
@@ -316,7 +322,20 @@ def inspect_runtime(codex_path: str | Path, *, timeout: float = 30, enable_local
             result.update(schema)
     except subprocess.TimeoutExpired:
         result["errors"].append({"code": "runtime_probe_timeout", "message": "Codex compatibility probe timed out"})
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except OSError as exc:
+        # Classify the actual launch failure without inferring a package layout
+        # or exposing OS error text (which can contain local paths).
+        if launching and sys.platform != "win32" and exc.errno in (errno.EACCES, errno.EPERM):
+            code = "runtime_not_executable"
+            message = "The selected Codex executable could not be launched. Check its execute permissions and local execution policy; keep the complete native distribution together."
+        elif launching and sys.platform != "win32" and exc.errno == errno.ENOEXEC:
+            code = "runtime_exec_format"
+            message = "The operating system could not execute the selected Codex format. Select a complete native distribution matching this operating system and CPU architecture, or a valid executable launcher."
+        else:
+            code = "runtime_probe_failed"
+            message = "Codex executable or generated App Server schema could not be read"
+        result["errors"].append({"code": code, "message": message})
+    except (ValueError, KeyError, TypeError) as exc:
         # Never surface executable stderr, config values, or full local paths.
         message = str(exc) if isinstance(exc, SchemaMismatch) else "Codex executable or generated App Server schema could not be read"
         result["errors"].append({"code": "runtime_probe_failed", "message": message[:240]})

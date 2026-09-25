@@ -45,7 +45,9 @@ class _BoundedErrors:
 
     def _drain(self):
         while True:
-            chunk = self.stream.read(1024)
+            # Buffered .read(n) can wait for a full block, hiding the final
+            # authentication line while SSH waits for forwarding traffic.
+            chunk = getattr(self.stream, 'read1', self.stream.read)(1024)
             if not chunk: return
             self.data.extend(chunk)
             if len(self.data) > 16384:
@@ -61,6 +63,19 @@ def _port(value, name):
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
         raise BridgeError("configuration", name + " must be an integer from 1 to 65535")
     return value
+
+
+def quote_ssh_option(value: str) -> str:
+    """Quote one value for OpenSSH's own -o parser, independently of argv.
+
+    Passing an argument list avoids shell parsing, but ssh still tokenizes -o
+    values. Escape its double-quote and backslash syntax so a selected filename
+    with spaces or quotes remains one filename, including Windows backslashes.
+    """
+    if (not isinstance(value, str) or not value or len(value) > 32768
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+        raise BridgeError("configuration", "SSH option values must be nonempty and contain no control characters")
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
 def configured_transports(cfg: dict) -> dict:
@@ -116,7 +131,7 @@ def transport_args(cfg: dict, peer_id: str) -> list[str]:
         raise BridgeError("configuration", "remote_peer_port must differ from the remote daemon port")
     return [str(ssh), "-F", "none", "-N", "-T", "-p", str(t["ssh_port"]), "-l", t["username"], "-i", t["identity_file"],
             "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=yes",
-            "-o", "UserKnownHostsFile=" + t["known_hosts_file"], "-o", "HostKeyAlias=" + t["host_key_alias"],
+            "-o", "UserKnownHostsFile=" + quote_ssh_option(t["known_hosts_file"]), "-o", "HostKeyAlias=" + t["host_key_alias"],
             "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3", "-o", "ConnectTimeout=10",
             "-L", f"127.0.0.1:{t['local_peer_port']}:127.0.0.1:{t['remote_bridge_port']}",
             "-R", f"127.0.0.1:{t['remote_peer_port']}:127.0.0.1:{cfg['listen_port']}", t["ssh_host"]]
@@ -274,6 +289,9 @@ def start_transports(path: str | Path, peer_id: str | None = None) -> dict:
     results = []
     for peer in _selected(cfg, peer_id):
         try:
+            entry = cfg.get('connections', {}).get(peer)
+            if entry and entry.get('mode', 'on_demand') == 'on_demand':
+                raise BridgeError('connection_manager_required', 'Use connect/connection_ensure for this negotiated peer; legacy transport start cannot compete with its manager')
             directory = transport_directory(cfg, peer); directory.mkdir(parents=True, exist_ok=True)
             if not transports[peer].get("enabled") or not cfg["peers"][peer].get("enabled"):
                 results.append({"peer_id": peer, "started": False, "state": "disabled"}); continue
@@ -290,6 +308,9 @@ def start_transports(path: str | Path, peer_id: str | None = None) -> dict:
                                     'ssh_connection_verified': False})
                     continue
                 autostart.clear_stop(path, 'transport', peer_id=peer)
+                # This is an explicit owner start, not a scheduler retry. The
+                # compatibility supervisor has a finite journal as well.
+                save(directory / 'legacy-budget.json', {'attempts': 0, 'state': 'authorized', 'authorized_at': now()})
                 if autostart.enabled(path, 'transport', peer_id=peer):
                     result = autostart.start(path, 'transport', peer_id=peer)
                     results.append({'peer_id': peer, **result, 'started': False,
@@ -350,11 +371,25 @@ def supervise_transport(path: str | Path, peer_id: str) -> dict:
     path = Path(path)
     cfg = read_config(path)
     _selected(cfg, peer_id)
+    entry = cfg.get('connections', {}).get(peer_id)
+    if entry and entry.get('mode', 'on_demand') == 'on_demand':
+        raise BridgeError('connection_manager_required', 'The daemon connection manager owns this peer; legacy supervisors cannot start it')
     directory = transport_directory(cfg, peer_id); directory.mkdir(parents=True, exist_ok=True)
     stop = directory / "stop"
     with process_lock(directory / "supervisor.lock"):
         save(directory / 'supervisor.pid.json', processes.record(os.getpid(), created_at=now(), peer_id=peer_id))
-        delay = 1
+        budget_path = directory / 'legacy-budget.json'
+        budget = _read_record(budget_path)
+        if budget.get('state') in ('attempting', 'exhausted', 'suspended'):
+            budget['state'] = 'suspended' if budget.get('state') == 'attempting' else budget['state']
+            save(budget_path, budget)
+            save(directory / 'status.json', {'state': 'failed', 'updated_at': now(),
+                 'last_error': {'code': 'explicit_retry_required', 'message': 'Legacy attempt budget is exhausted or interrupted; an explicit owner transport-start is required'}})
+            (directory / 'supervisor.pid.json').unlink(missing_ok=True)
+            return {'peer_id': peer_id, 'stopped': True, 'retry_required': True}
+        budget = {'attempts': 0, 'state': 'attempting', 'started_at': now()}
+        deadline = time.monotonic() + 45
+        save(budget_path, budget)
         child = None
         owner = None
         errors = None
@@ -362,6 +397,10 @@ def supervise_transport(path: str | Path, peer_id: str) -> dict:
             save(directory / "status.json", {"state": state, "updated_at": now(), "last_error": error})
         try:
             while not stop.exists():
+                if budget['attempts'] >= 2 or time.monotonic() >= deadline:
+                    budget['state'] = 'exhausted'; save(budget_path, budget)
+                    status('failed', {'code': 'explicit_retry_required', 'message': 'The bounded legacy SSH attempts ended; request an explicit retry'})
+                    break
                 cfg = read_config(path)
                 transports = configured_transports(cfg)
                 t = transports.get(peer_id)
@@ -369,7 +408,8 @@ def supervise_transport(path: str | Path, peer_id: str) -> dict:
                     break
                 args = transport_args(cfg, peer_id)
                 status("connecting")
-                began = time.monotonic()
+                budget['attempts'] += 1
+                save(budget_path, budget)  # Charge durably before creating SSH.
                 owner = _spawn_ssh(args)
                 child = owner.process
                 errors = _BoundedErrors(child.stderr)
@@ -385,11 +425,16 @@ def supervise_transport(path: str | Path, peer_id: str) -> dict:
                 error_code = errors.finish()
                 errors = None
                 if stop.exists(): break
+                latest = read_config(path)
+                if not latest.get('peers', {}).get(peer_id, {}).get('enabled') or configured_transports(latest).get(peer_id) != t:
+                    break
+                if error_code in ('ssh_host_key_failed', 'ssh_authentication_failed', 'forwarding_port_in_use', 'forwarding_denied'):
+                    budget['state'] = 'exhausted'; save(budget_path, budget)
+                    status('failed', {'code': error_code})
+                    break
                 status("retrying", {"code": error_code, "exit_code": child.returncode})
-                if time.monotonic() - began > 30: delay = 1
-                deadline = time.monotonic() + delay
-                while time.monotonic() < deadline and not stop.exists(): time.sleep(.1)
-                delay = min(30, delay*2)
+                retry_at = min(deadline, time.monotonic() + 5)
+                while time.monotonic() < retry_at and not stop.exists(): time.sleep(.1)
         except (OSError, BridgeError) as exc:
             status("failed", {"code": getattr(exc, "code", "ssh_start_failed"), "message": "SSH transport could not continue; check local settings and forwarding permissions"})
             raise

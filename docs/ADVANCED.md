@@ -48,9 +48,9 @@ This feature uses experimental App Server dynamic tools verified on the document
 
 ## Additional peers
 
-Use `pair-setup` with a new peer ID, then `transport-config` to choose dedicated forwarding endpoints. The named `ssh_transports` configuration supports multiple independent supervisors. `transport-start`, `transport-stop`, and `transport-status` accept `--peer ID`; without it they apply to all configured routes. Peers may share the local Bridge listen port but need distinct local forwarding listeners.
+Use `pair-setup` with a new peer ID, then configure outbound SSH settings and the shared candidate map on both endpoints. Each peer needs distinct forwarding listeners and independent receiving authorization. Use `connect`, `connection-status`, and `disconnect` with an explicit peer. See [candidate configuration](CONNECTIONS.md#pairing-and-route-configuration).
 
-The legacy single `ssh_transport` remains readable. If it lacks `peer_id`, its original peer must be unambiguous before adding another. Stop an old running supervisor before migrating it; the upgraded manager refuses to compete for its ports.
+The legacy `ssh_transport`/`ssh_transports` configuration remains readable. Legacy `transport-start`, `transport-stop`, and `transport-status` are migration controls, not the normal on-demand workflow. If an old route lacks `peer_id`, its original peer must be unambiguous before adding another. Retire its old supervisor through its verified owner before reusing its ports; the managed route must not compete for them.
 
 Do not expand an existing peer's project permissions just because another project needs broader access.
 
@@ -66,7 +66,13 @@ Files over 8 MiB use negotiated chunking. The initial send/fetch returns a trans
 
 ## Update an existing installation
 
-Finish or cancel active Bridge tasks. On Windows, disable future startup, then stop the affected transports and Bridge before replacing installed files. The installer preserves private configuration and state. Install the same release on both computers, run `setup` to check each local runtime, re-enable the chosen startup components explicitly, and start them for the current login. Use `preflight` before sending more work.
+Test the candidate in a separate empty directory/configuration first. Before an in-place upgrade, drain local workers, record process/startup ownership, and retain the previous source and local settings for rollback. Coordinate any daemon maintenance interval. Preserve a working recovery connection; do not stop unrelated tunnels to copy code.
+
+Source installers refuse unrelated nonempty directories, conflicting local `.mcp.json`, and changed installed code unless you explicitly request an upgrade. After stopping the affected local workers, use Windows `scripts/setup.ps1 -Upgrade` or Linux `sh scripts/setup.sh --upgrade`. All selected payload files are validated and staged before replacing installed files. Matching local launchers are preserved byte-for-byte; conflicts must be resolved locally. This never copies source `.mcp.json`, private configuration, or state. The optional zipapp deliberately refuses upgrades; use a fresh directory or the source installer.
+
+Keep the same private configuration and MCP registration path. A different selected configuration is not an upgrade: use a distinct installation/registration, or deliberately repair the local launcher after backup. If MCP registration conflicts, inspect it rather than deleting the other registration. Private config and database files should remain outside the source installation. Installer file staging does not replace the requirement to stop workers.
+
+After both peers are ready, run local runtime checks and retained-session tests. Choose waiting daemon startup explicitly. Review old transport startup separately so an upgrade does not preserve unwanted automatic dialing unnoticed. Follow the [connection migration](CONNECTIONS.md#migrate-without-losing-work) before managed dual initiation. Roll back source/registration if needed, without replacing newer state/results with an old database snapshot.
 
 An MCP-only installation at the same path needs no new registration. A plugin installation needs the cachebuster/reinstall flow above and a fresh Codex conversation to load the new tools. Do not register both routes.
 
@@ -76,21 +82,21 @@ For missing runtime helpers or a different local Codex selection, use the [path-
 
 Static schema and bundle checks do not execute a native command. Verify the repair with an authorized command in the retained conversation and inspect `execution_evidence`; verify selected file bytes/hash separately where applicable.
 
-## Windows owner-login startup
+## Owner-login startup
 
-`autostart-enable` is an explicit local-owner operation. Its default `--component auto` registers the daemon and currently enabled paired SSH transports. It snapshots that selection: a later peer is not silently added. Select one route with `--component transport --peer ID`, or only the daemon with `--component daemon`.
+`autostart-enable` is an explicit local-owner operation. Its default and retained `--component auto` alias register **only the daemon**. `--component daemon` is the recommended explicit form. Persistent transport startup requires `--component transport --peer ID`; adding a peer never opts it in. Waiting startup launches no SSH clients, including when results are pending.
 
-Enabling registers future startup and does not start anything immediately. Use `start --interactive` and `transport-start --peer ID` when ready to run now. Tasks use the owner's interactive Windows login at limited privilege; they do not store a Windows password or run Codex as a pre-login service. This uses Windows' [scheduled-task principal modes](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtaskprincipal?view=windowsserver2025-ps).
+Enabling registers future startup and does not start anything immediately. Use `start --interactive` on Windows, `start --background` on Linux, and an explicit `connect --peer ID --request-id UUID` to collaborate. Windows tasks use the owner's interactive login at limited privilege; they do not store a Windows password or run Codex before login. This uses Windows' [scheduled-task principal modes](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtaskprincipal?view=windowsserver2025-ps).
 
 `autostart-status` distinguishes registration, enabled configuration, stop requests, and observed supervisor identity. Process observations do not establish remote readiness; use `preflight` and a completed harmless task.
 
-A deliberate `stop` or `transport-stop` remains in effect for the owner's current Windows login, including scheduler retries. An explicit start clears that stop after the previous process has stopped. The next owner login can start an enabled component again. Only Bridge-owned, identity-verified processes may be recovered or stopped.
+A daemon `stop` is distinct from a peer `disconnect`. Peer disconnect intent is durable across login/restart and requires explicit local resume; incoming traffic cannot clear it. The legacy daemon/startup wrapper also respects its owner stop marker, with platform-specific login semantics. Only Bridge-owned, identity-verified processes may be recovered or stopped.
 
 `autostart-disable` disables future login triggers while preserving running work. It is separate from stopping a component. `autostart-disable --remove` removes selected registrations only after their work and wrappers have stopped. Additional routes retain separate startup, stop markers, and scopes.
 
 When upgrading a legacy single transport, stop its old supervisor first and explicitly enable the intended named peer. An unbound legacy transport registration is not permission to start every new peer. Preserve current task/session state and existing request IDs during migration.
 
-Built-in login registration is Windows-only. On macOS/Linux, use the portable launcher and manual starts. [Tailscale network startup](TAILSCALE.md#3-keep-the-network-available-after-restart) is a separate prerequisite on each platform.
+Linux registration uses a systemd user unit where available; it does not enable root execution or lingering. Other environments use manual starts. [Tailscale network startup](TAILSCALE.md#3-keep-the-network-available-after-restart) and the receiving SSH service remain separate OS prerequisites. Configuration/registration checks and actual sign-in/reboot tests are reported separately.
 
 ## Revocation
 

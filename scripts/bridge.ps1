@@ -25,7 +25,7 @@ if (-not $ConfigPath -and -not $env:CODEX_BRIDGE_CONFIG -and $null -ne $launcher
         $ConfigPath = [string]$launcherArguments[$configFlagIndex + 1]
     }
 }
-$commandArguments = @('-m', 'codex_bridge.cli')
+$commandArguments = @('-I', (Join-Path $bridgeRoot 'scripts\run_bridge.py'))
 if ($ConfigPath) { $commandArguments += @('--config', $ConfigPath) }
 if ($BridgeArguments) { $commandArguments += $BridgeArguments }
 else { $commandArguments += '--help' }

@@ -6,7 +6,7 @@ export PYTHONPATH="$bridge_root"
 if [ "$#" -eq 0 ]; then
     set -- --help
 fi
-exec "$bridge_python" -c '
+exec "$bridge_python" -I -c '
 import json, os, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 arguments = sys.argv[2:]
@@ -21,5 +21,5 @@ if not config and "--config" in saved:
     if index + 1 < len(saved): config = saved[index + 1]
 if config and not any(arg == "--config" or arg.startswith("--config=") for arg in arguments):
     arguments = ["--config", config, *arguments]
-os.execvpe(runtime, [runtime, "-m", "codex_bridge.cli", *arguments], os.environ)
+os.execvpe(runtime, [runtime, "-I", str(root / "scripts" / "run_bridge.py"), *arguments], os.environ)
 ' "$bridge_root" "$@"

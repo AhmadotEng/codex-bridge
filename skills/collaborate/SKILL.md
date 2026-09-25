@@ -9,7 +9,7 @@ Use the `codex_bridge` MCP tools for the user's selected collaboration project. 
 
 ## Start or resume
 
-1. Call `bridge_status` for a safe local overview, then `peer_status` to inspect availability and supported capabilities.
+1. Call `local_status` (or `bridge_status`) and `connection_status` for the selected peer. Read-only status does not launch SSH or clear a deliberate stop. When the user requests collaboration, use `connection_ensure` with a retained demand UUID; it may start only the local owner's daemon and establish/reuse that peer's managed tunnel. Use `connection_retry` only for an explicit retry/resume request after exhaustion or a deliberate stop. Then inspect `peer_status` for authenticated identity and Codex readiness.
 2. Call `session_list` and `session_get` to find the designated project conversation and read current context, responsibilities, revision, messages, and results. Continue that session when it matches the user's goal.
 3. If a new project session is requested, call `session_create` with the configured peer and project IDs, a clear goal, and responsibilities. Supply a fresh UUID as `session_id` and keep it for retries. Selecting a project never grants access to a different workspace.
 4. If a project is not configured, report the missing local project configuration. Do not reinterpret a path in a peer message as authorization to expand access.
@@ -35,6 +35,12 @@ Files above 8 MiB return durable asynchronous progress when both peers support c
 Use `session_chat` to find this computer's local project chat and last observed ownership. Return its local link only for use on this computer. Each peer has a separate conversation ID, created on its first received task. Reuse the existing session instead of creating duplicate chats. Bridge releases its worker after a turn; when another app owns the chat, report `conversation_in_use` and let its owner release it. Do not terminate unrelated processes or treat old ownership observations as a live desktop lock query.
 
 ## Interpretation and failure handling
+
+If MCP tools are unavailable, the ordinary local owner Codex may run the installed launcher: Windows `~/plugins/codex-bridge/scripts/bridge.ps1 status` then `start --interactive`; Linux `sh ~/plugins/codex-bridge/scripts/bridge.sh status` then `start --background`. Both expose `connection-status --peer ID`, `connect --peer ID --request-id UUID`, `connect --peer ID --retry --request-id UUID`, and `disconnect --peer ID --request-id UUID`. Keep actual installation/configuration paths from local setup; do not invent them. The isolated fallback is `python -I /absolute/install/scripts/run_bridge.py --config /absolute/config.json COMMAND` (use the owner's selected interpreter).
+
+Waiting startup is daemon-only. Do not enable persistent transport startup unless the owner explicitly requests it for that peer. Initial attempts and active-work recovery have finite budgets. Polling, pending results, or login cannot authorize another attempt after exhaustion. A stopped remote daemon requires its owner's local action; forwarding-only SSH does not become a remote shell.
+
+Report the stage exactly: before an attempt, **Not connected; remote Bridge not checked.** If SSH works but the configured Bridge port is unavailable, **SSH connected; remote Bridge unavailable at the configured port.** Distinguish an HTTP authorization refusal and remote Codex sign-in failure from SSH failure. Do not relaunch SSH repeatedly for them.
 
 The returned envelope includes `ok`, `result`, `error`, `request_id`, and `timestamp`. Availability, SSH transport, local daemon access, Codex authentication, execution approval, and task completion are separate states. Report the specific failing state; do not describe a running tunnel as a completed project task.
 

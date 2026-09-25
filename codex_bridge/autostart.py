@@ -1,4 +1,4 @@
-"""Explicit per-owner Windows login tasks, scoped to a daemon or one peer route."""
+"""Independent owner-login startup: waiting daemon or one explicit persistent peer."""
 from __future__ import annotations
 import contextlib
 import hashlib
@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import uuid
 from .core import BridgeError, canonical, identifier, now, windows_file_retry
 from . import processes
 
@@ -43,7 +44,8 @@ def enabled(path, component, peer_id=None): return bool(_entry_settings(settings
 
 def task_name(path, component, peer_id=None):
     _validate(component, peer_id)
-    suffix = hashlib.sha256(str(Path(path).resolve()).casefold().encode()).hexdigest()[:16]
+    config_identity = str(Path(path).resolve())
+    suffix = hashlib.sha256((config_identity.casefold() if os.name == 'nt' else config_identity).encode()).hexdigest()[:16]
     label = component if peer_id is None else component+'-'+hashlib.sha256(peer_id.encode()).hexdigest()[:16]
     return f'CodexBridgeStartup-{label}-{suffix}'
 
@@ -79,13 +81,18 @@ def clear_stop(path, component, peer_id=None):
 def _windows():
     if os.name != 'nt': raise BridgeError('configuration', 'Persistent owner-login tasks require Windows; use manual background startup on this platform')
 
+def _uses_windows(): return os.name == 'nt'
+
 def _targets(path, component, peer_id=None, *, for_enable=False):
     if component not in ('daemon', 'transport', 'auto', 'all'): raise BridgeError('configuration', 'Select daemon, transport, auto, or all')
-    if component == 'daemon' and peer_id is not None: raise BridgeError('configuration', '--peer cannot select a daemon')
+    if component in ('daemon', 'auto') and peer_id is not None: raise BridgeError('configuration', '--peer applies only to explicit transport startup')
     if peer_id is not None: identifier(peer_id, 'peer_id')
     result = [('daemon', None)] if component in ('daemon', 'auto', 'all') else []
-    if component == 'daemon': return result
+    # Legacy "auto" means waiting only. Never infer outgoing demand from pairing.
+    if component in ('daemon', 'auto'): return result
     if for_enable:
+        if component != 'transport' or peer_id is None:
+            raise BridgeError('persistent_peer_required', 'Enable waiting startup with --component daemon. Persistent connections require --component transport --peer PEER_ID explicitly.')
         from .transport import configured_transports, transport_args
         cfg = _cli().read_config(path); routes = configured_transports(cfg)
         peers = [peer_id] if peer_id is not None else sorted(k for k, v in routes.items() if v.get('enabled') and cfg['peers'][k].get('enabled'))
@@ -112,19 +119,57 @@ def _registration(path, component, peer_id=None):
     return {'enabled': True, 'component': component, 'peer_id': peer_id, 'task_name': task_name(path, component, peer_id),
             'python': str(_pythonw()), 'arguments': subprocess.list2cmdline(arguments), 'source': str(Path(__file__).resolve().parents[1])}
 
+def _owner_guard(path, component, peer_id, data):
+    """Validate the exact saved owner action before any Windows task mutation."""
+    cli = _cli()
+    saved = _entry_settings(data, component, peer_id)
+    arguments = ['-m', 'codex_bridge.cli', '--config', str(path), 'autostart-run', '--component', component]
+    if peer_id is not None: arguments.extend(['--peer', peer_id])
+    return ['$task = Get-ScheduledTask -TaskName ' + cli.ps_literal(task_name(path, component, peer_id)) + ' -ErrorAction SilentlyContinue',
+        'if ($task) {',
+        '$owner = if ($task.Principal.UserId -match \'^S-1-\') { [Security.Principal.SecurityIdentifier]::new($task.Principal.UserId).Value } else { [Security.Principal.NTAccount]::new($task.Principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value }',
+        'if ($owner -ne $identity.User.Value -or @($task.Actions).Count -ne 1 -or ' +
+        '$task.Actions[0].Execute -ne ' + cli.ps_literal(saved.get('python', str(Path(sys.executable).resolve().with_name('pythonw.exe')))) + ' -or ' +
+        '$task.Actions[0].Arguments -ne ' + cli.ps_literal(saved.get('arguments', subprocess.list2cmdline(arguments))) + ' -or ' +
+        '$task.Actions[0].WorkingDirectory -ne ' + cli.ps_literal(saved.get('source', str(Path(__file__).resolve().parents[1]))) +
+        ") { throw 'Existing startup task does not match the saved Bridge owner and launcher; it was preserved.' }", '}']
+
+def _transaction_begin(names):
+    cli = _cli()
+    names = '@(' + ','.join(cli.ps_literal(name) for name in names) + ')'
+    return ['$previousTasks = @()', 'foreach ($name in ' + names + ') {',
+            '$task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue',
+            '$previousTasks += [pscustomobject]@{Name=$name; Xml=if($task){Export-ScheduledTask -TaskName $name}else{$null}}',
+            '}', 'try {']
+
+def _transaction_end():
+    return ['} catch {', '$originalFailure = $_; $rollbackFailed = $false',
+            'foreach ($previous in $previousTasks) { try {',
+            'if ($previous.Xml) { Register-ScheduledTask -TaskName $previous.Name -Xml $previous.Xml -Force | Out-Null }',
+            'elseif (Get-ScheduledTask -TaskName $previous.Name -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName $previous.Name -Confirm:$false }',
+            '} catch { $rollbackFailed = $true } }',
+            "if ($rollbackFailed) { throw 'Startup registration failed and rollback was incomplete. Inspect the exact Bridge tasks; active work was not stopped.' }",
+            'throw $originalFailure', '}']
+
 def enable(path, component='auto', peer_id=None):
+    if not _uses_windows():
+        from . import autostart_posix
+        return autostart_posix.enable(path, component, peer_id)
     _windows(); cli = _cli(); selected = _targets(path, component, peer_id, for_enable=True)
     entries = [_registration(path, kind, peer) for kind, peer in selected]; data = settings(path)
     migrate_legacy = any(kind == 'transport' for kind, peer in selected) and bool(data['components'].get('transport', {}).get('enabled'))
     lines = ["$ErrorActionPreference = 'Stop'", '$identity = [Security.Principal.WindowsIdentity]::GetCurrent()']
     for item in entries:
         lines += ['$task = Get-ScheduledTask -TaskName '+cli.ps_literal(item['task_name'])+' -ErrorAction SilentlyContinue',
-            "if ($task -and $task.State -eq 'Running') {",
+            'if ($task) {',
             '$owner = if ($task.Principal.UserId -match \'^S-1-\') { [Security.Principal.SecurityIdentifier]::new($task.Principal.UserId).Value } else { [Security.Principal.NTAccount]::new($task.Principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value }',
             '$ownerTriggers = @($task.Triggers | Where-Object { $_.CimClass.CimClassName -eq \'MSFT_TaskLogonTrigger\' -and ($_.UserId -eq $identity.Name -or $_.UserId -eq $identity.User.Value) })',
             'if ($owner -ne $identity.User.Value -or [string]$task.Principal.LogonType -ne \'Interactive\' -or [string]$task.Principal.RunLevel -ne \'Limited\' -or -not $task.Settings.Hidden -or @($task.Actions).Count -ne 1 -or @($task.Triggers).Count -ne 1 -or $ownerTriggers.Count -ne 1 -or '+
             '$task.Actions[0].Execute -ne '+cli.ps_literal(item['python'])+' -or '+'$task.Actions[0].Arguments -ne '+cli.ps_literal(item['arguments'])+' -or '+'$task.Actions[0].WorkingDirectory -ne '+cli.ps_literal(item['source'])+
-            ") { throw 'Stop this existing startup task before changing its launcher or owner policy.' }", '}']
+            ") { throw 'Existing startup registration differs from the expected owner or launcher; inspect it before changing it.' }", '}']
+    if migrate_legacy: lines += _owner_guard(path, 'transport', None, data)
+    names = [item['task_name'] for item in entries] + ([task_name(path, 'transport')] if migrate_legacy else [])
+    lines += _transaction_begin(names)
     if migrate_legacy:
         legacy = cli.ps_literal(task_name(path, 'transport'))
         lines += ['if (Get-ScheduledTask -TaskName '+legacy+' -ErrorAction SilentlyContinue) { Disable-ScheduledTask -TaskName '+legacy+' | Out-Null }']
@@ -135,8 +180,9 @@ def enable(path, component='auto', peer_id=None):
             '$action = New-ScheduledTaskAction -Execute '+cli.ps_literal(item['python'])+' -Argument '+cli.ps_literal(item['arguments'])+' -WorkingDirectory '+cli.ps_literal(item['source']),
             '$principal = New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType Interactive -RunLevel Limited',
             '$trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity.Name',
-            '$settings = New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)',
+            '$settings = New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries'+(' -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)' if item['component'] == 'daemon' else ''),
             'Register-ScheduledTask -TaskName '+name+' -Action $action -Principal $principal -Trigger $trigger -Settings $settings -Description '+cli.ps_literal('Codex Bridge owner-login startup; local account, no password or elevation.')+' -Force | Out-Null', '}']
+    lines += _transaction_end()
     cli.powershell('\n'.join(lines))
     for item in entries:
         (data['transports'] if item['peer_id'] is not None else data['components'])[item['peer_id'] or item['component']] = item
@@ -144,21 +190,27 @@ def enable(path, component='auto', peer_id=None):
     data.update(version=2, updated_at=now()); cli.save(state_path(path)/'autostart.json', data)
     return {'enabled_components': [{'component': kind, 'peer_id': peer} for kind, peer in selected], 'started_now': False,
             'legacy_transport_disabled': migrate_legacy, 'tasks': [item['task_name'] for item in entries],
-            'note': 'Runs after this Windows owner signs in. Registration does not start work now or include future peers.'}
+            'note': 'Runs after this Windows owner signs in. Daemon startup only waits; explicit per-peer persistent startup consults the finite connection manager. Registration does not start anything now.'}
 
 def disable(path, component='all', remove=False, peer_id=None):
+    if not _uses_windows():
+        from . import autostart_posix
+        return autostart_posix.disable(path, component, remove, peer_id)
     _windows(); cli = _cli(); selected = _targets(path, component, peer_id); data = settings(path)
-    lines = ["$ErrorActionPreference = 'Stop'"]
+    lines = ["$ErrorActionPreference = 'Stop'", '$identity = [Security.Principal.WindowsIdentity]::GetCurrent()']
+    for kind, peer in selected: lines += _owner_guard(path, kind, peer, data)
     if remove:
         for kind, peer in selected:
             if cli.lock_held(runner_lock(path, kind, peer)) or cli.lock_held(component_lock(path, kind, peer)):
                 raise BridgeError('component_running', 'Stop the selected component before removing its login task')
             lines += ['$task = Get-ScheduledTask -TaskName '+cli.ps_literal(task_name(path, kind, peer))+' -ErrorAction SilentlyContinue',
                 "if ($task -and $task.State -eq 'Running') { throw 'Stop the selected task before removing its registration.' }"]
+    lines += _transaction_begin([task_name(path, kind, peer) for kind, peer in selected])
     for kind, peer in selected:
         literal = cli.ps_literal(task_name(path, kind, peer))
         lines += ['if (Get-ScheduledTask -TaskName '+literal+' -ErrorAction SilentlyContinue) {',
             ('Unregister-ScheduledTask -TaskName '+literal+' -Confirm:$false' if remove else 'Disable-ScheduledTask -TaskName '+literal+' | Out-Null'), '}']
+    lines += _transaction_end()
     cli.powershell('\n'.join(lines))
     for kind, peer in selected:
         mapping, key = (data['transports'], peer) if peer is not None else (data['components'], kind)
@@ -167,6 +219,9 @@ def disable(path, component='all', remove=False, peer_id=None):
     return {'disabled_components': [{'component': kind, 'peer_id': peer} for kind, peer in selected], 'registrations_removed': remove, 'running_work_stopped': False}
 
 def status(path, peer_id=None):
+    if not _uses_windows():
+        from . import autostart_posix
+        return autostart_posix.status(path, peer_id)
     _windows(); cli = _cli(); selected = _targets(path, 'all', peer_id)
     lines = ["$ErrorActionPreference = 'Stop'", '$rows = @()']
     for kind, peer in selected:
@@ -182,11 +237,14 @@ def status(path, peer_id=None):
     return {'components': rows, 'readiness': 'Login-task/process state does not verify SSH, peer reachability, or Codex task completion.'}
 
 def start(path, component, peer_id=None):
+    if not _uses_windows():
+        from . import autostart_posix
+        return autostart_posix.start(path, component, peer_id)
     _windows()
     if component == 'transport' and peer_id is None: raise BridgeError('legacy_autostart_requires_peer', 'Re-enable transport startup with an explicit --peer before starting the legacy login task')
     if not enabled(path, component, peer_id): raise BridgeError('configuration', 'Persistent startup is not enabled for this component')
     cli = _cli(); name = task_name(path, component, peer_id)
-    cli.powershell('\n'.join(["$ErrorActionPreference = 'Stop'", '$task = Get-ScheduledTask -TaskName '+cli.ps_literal(name)+' -ErrorAction SilentlyContinue',
+    cli.powershell('\n'.join(["$ErrorActionPreference = 'Stop'", '$identity = [Security.Principal.WindowsIdentity]::GetCurrent()', *_owner_guard(path, component, peer_id, settings(path)), '$task = Get-ScheduledTask -TaskName '+cli.ps_literal(name)+' -ErrorAction SilentlyContinue',
         "if (-not $task -or $task.State -eq 'Disabled') { throw 'The configured login task is missing or disabled; run autostart-enable to repair it.' }", 'Start-ScheduledTask -TaskName '+cli.ps_literal(name)]))
     return {'launch_mode': 'owner-login-task', 'task_name': name, 'peer_id': peer_id, 'start_requested': True}
 
@@ -211,7 +269,7 @@ def marker_control(path, component, peer_id=None):
     finally: manager.__exit__(None, None, None)
 
 def run(path, component, peer_id=None):
-    _windows(); cli = _cli(); directory = component_directory(path, component, peer_id); directory.mkdir(parents=True, exist_ok=True)
+    cli = _cli(); directory = component_directory(path, component, peer_id); directory.mkdir(parents=True, exist_ok=True)
     record_path = runner_record(path, component, peer_id)
     with cli.process_lock(runner_lock(path, component, peer_id)):
         if not enabled(path, component, peer_id): return 0
@@ -224,6 +282,9 @@ def run(path, component, peer_id=None):
                     with marker_control(path, component, peer_id):
                         marker = stop_path(path, component, peer_id)
                         if marker.exists():
+                            # New sign-in may resume the waiting daemon; it must
+                            # never undo a deliberate per-peer disconnect.
+                            if component == 'transport': return 0
                             try: previous = cli.read(marker)
                             except (ValueError, OSError): return 0
                             if not isinstance(previous, dict) or not previous.get('login_identity'): return 0
@@ -239,8 +300,23 @@ def run(path, component, peer_id=None):
 
 def supervise(path, component, log, peer_id=None):
     cli = _cli(); state = component_directory(path, component, peer_id); state.mkdir(parents=True, exist_ok=True)
-    mode = 'serve' if component == 'daemon' else 'transport-run'
     if component == 'transport' and peer_id is None: raise BridgeError('legacy_autostart_requires_peer', 'Select an explicit peer for transport startup')
+    if component == 'transport':
+        # One durable demand, not an SSH subprocess/restart loop. The daemon owns
+        # retry budgets across scheduler retries, restarts and Windows sign-ins.
+        if stop_path(path, 'daemon').exists():
+            _event(log, 'local_daemon_stopped', component=component, peer_id=peer_id)
+            return 0
+        try:
+            cli.valid_response(cli.call(path, 'session_list', {}, timeout=2))
+        except OSError:
+            cli.start_daemon(path)
+        request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'codex-bridge-persistent:' + str(Path(path).resolve()) + ':' + peer_id))
+        result = cli.valid_response(cli.call(path, 'connection_ensure',
+            {'peer_id': peer_id, 'request_id': request_id, 'persistent': True}, timeout=50))
+        _event(log, 'persistent_demand_submitted', component=component, peer_id=peer_id, request_id=request_id)
+        return 0
+    mode = 'serve'
     if cli.lock_held(component_lock(path, component, peer_id)):
         _event(log, 'component_already_running', component=component, peer_id=peer_id); return 0
     marker = stop_path(path, component, peer_id); source = str(Path(__file__).resolve().parents[1])

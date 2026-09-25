@@ -148,7 +148,8 @@ def setup(path, *, peer_id=None, codex=None, port=None, batch=False, prompt=inpu
     if _bundle_status(runtime) == 'incomplete':
         raise BridgeError('runtime_bundle_incomplete', 'The selected Codex runtime is missing usable companion files. Select a complete installed runtime folder; do not copy or mix individual executables. Existing configuration was preserved.')
     if not runtime.get('ready'):
-        raise BridgeError('runtime_incompatible', 'The selected Codex App Server schema is not compatible. Run preflight for a safe compatibility report.')
+        code, message = _runtime_failure(runtime)
+        raise BridgeError(code, message)
     if not existing:
         state = path.parent / 'state'
         if state.exists() and any(state.iterdir()):
@@ -174,8 +175,8 @@ def setup(path, *, peer_id=None, codex=None, port=None, batch=False, prompt=inpu
               'next_steps': ['Pair computers with pair-setup.',
                              'Select the existing SSH route with transport-config on its owner; the Tailscale guide covers ordinary OpenSSH over Tailscale.',
                              'Select a workspace with project-select on both computers.',
-                             'Optionally register owner-login startup with autostart-enable on Windows; this does not start Bridge now.',
-                             'Start Bridge on both computers; start the SSH transport on its owner; run preflight.']}
+                             'Optionally register daemon-only owner-session startup with autostart-enable --component daemon on Windows or Linux; this does not start Bridge now.',
+                             'Start Bridge on both computers; use connect --peer PEER_ID --request-id UUID when collaboration is requested; run preflight.']}
     if register:
         result['registration'] = register_mcp(selected_codex, path, runner=runner)
     return result
@@ -195,7 +196,7 @@ def continue_setup(path, result, *, prompt=input):
     peer = peers[0] if len(peers) == 1 else ask(
         'Other computer name (leave blank to pair later)', prompt=prompt, required=False)
     if not peer:
-        return result
+        return offer_autostart(path, result, prompt=prompt)
     result['pairing'] = pair_setup(path, peer_id=peer, prompt=prompt)
     owns_route = ask('Does this computer start the existing SSH connection? yes/no',
                      'no', prompt=prompt).casefold()
@@ -208,28 +209,24 @@ def continue_setup(path, result, *, prompt=input):
 
 
 def offer_autostart(path, result, *, prompt=input, platform=None, register=None, read_settings=None):
-    """Owner-only, explicit opt-in after pairing/project selection; never starts work."""
-    if (platform or os.name) != 'nt':
+    """Offer waiting daemon startup independently of pairing, projects or transports."""
+    selected_platform = platform or ('nt' if os.name == 'nt' else sys.platform)
+    if selected_platform not in ('nt', 'posix', 'linux'):
         return result
     from . import autostart
     configured = (read_settings or autostart.settings)(path)
-    entries = [*configured.get('components', {}).values(), *configured.get('transports', {}).values()]
-    if any(isinstance(entry, dict) and entry.get('enabled') for entry in entries):
+    daemon = configured.get('components', {}).get('daemon', {})
+    if daemon.get('enabled'):
         result['autostart'] = {'changed': False, 'existing_registration_preserved': True,
                                'next_step': 'Use autostart-status to inspect existing startup. Add new peer transports explicitly with autostart-enable --component transport --peer PEER_ID.'}
         return result
-    cfg = _admin().read_config(Path(path))
-    if not cfg.get('projects') or not any(peer.get('enabled') for peer in cfg.get('peers', {}).values()):
-        result['autostart'] = {'changed': False, 'offered': False,
-                               'next_step': 'Complete pairing and project selection, then use autostart-enable to opt into Windows owner-login startup.'}
-        return result
-    choice = ask('Register Bridge and its currently enabled peer transports for your next Windows sign-in? This does not start anything now. yes/no',
+    choice = ask('Start the waiting Bridge daemon at your next owner sign-in? This does not start it now or enable outgoing SSH connections. yes/no',
                  'no', prompt=prompt).casefold()
     if choice in ('yes', 'y'):
-        result['autostart'] = (register or autostart.enable)(path, component='auto')
+        result['autostart'] = (register or autostart.enable)(path, component='daemon')
     elif choice in ('no', 'n'):
         result['autostart'] = {'changed': False, 'offered': True, 'choice': 'not_enabled',
-                               'next_step': 'You can opt in later with autostart-enable. Start Bridge manually for this login.'}
+                               'next_step': 'You can opt in later with autostart-enable --component daemon. Start Bridge manually for this login.'}
     else:
         raise BridgeError('invalid_choice', 'Startup was not changed. Answer yes or no, or run autostart-enable explicitly later.')
     return result
@@ -444,12 +441,14 @@ def transport_config(path, *, peer_id=None, settings=None, batch=False, prompt=i
         item[key] = value
     item['enabled'] = True
     updated = configure_transport(cfg, peer_id, item)
-    validate_transports(updated)
+    # configure_transport already validates the selected peer's local files.
+    # Keep cross-peer port checks without requiring another peer's old key files.
+    validate_transports(updated, check_files=False)
     updated['peers'][peer_id]['url'] = 'http://127.0.0.1:' + str(item['local_peer_port'])
     admin.save(path, updated)
     return {'ok': True, 'timestamp': now(), 'peer_id': peer_id, 'configured': True,
             'started': False, 'private_keys_copied': False,
-            'next_step': 'Start both bridges, then transport-start --peer ' + peer_id + ' on this computer. Keep the other computer\'s peer URL matched to remote_peer_port.'}
+            'next_step': 'Start both bridges, then connect --peer ' + peer_id + ' --request-id UUID when collaboration is requested. Keep the other computer\'s peer URL matched to remote_peer_port; configuring a route does not start it.'}
 
 
 def peer_probe(peer, *, timeout=5):
@@ -496,6 +495,18 @@ def _bundle_status(runtime):
     return status if status in ('complete', 'incomplete', 'unknown', 'not_applicable') else 'unknown'
 
 
+def _runtime_failure(runtime):
+    messages = {
+        'runtime_not_executable': 'The selected Codex runtime could not execute. Check its execute permission and local execution policy.',
+        'runtime_exec_format': 'The selected Codex runtime has an incompatible executable format. Select the complete native distribution for this operating system and CPU architecture.'}
+    errors = runtime.get('errors', [])
+    for error in errors if isinstance(errors, list) else []:
+        code = error.get('code') if isinstance(error, dict) else None
+        if isinstance(code, str) and code in messages:
+            return code, messages[code]
+    return 'runtime_incompatible', 'Codex App Server compatibility could not be verified. Run preflight with a complete compatible local runtime.'
+
+
 def preflight(path, *, peer_id=None, project_id=None, runtime_probe=inspect_runtime,
               runner=_run, probe=peer_probe, tcp_probe=_tcp_probe, local_call=None):
     """Sanitized layered diagnostics: no configuration, paths, logs, or raw errors."""
@@ -516,12 +527,13 @@ def preflight(path, *, peer_id=None, project_id=None, runtime_probe=inspect_runt
     except Exception:
         runtime = {'ready': False}
     schema_ready = runtime.get('schema_ready', runtime.get('ready')) is True
+    failure_code, failure_message = _runtime_failure(runtime)
     version = runtime.get('codex_version')
     if not isinstance(version, str) or not re.fullmatch(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?', version):
         version = None
     add('runtime', 'pass' if schema_ready else 'fail',
-        'runtime_compatible' if schema_ready else 'runtime_incompatible',
-        'Codex App Server schema is compatible.' if schema_ready else 'Codex App Server compatibility could not be verified.',
+        'runtime_compatible' if schema_ready else failure_code,
+        'Codex App Server schema is compatible.' if schema_ready else failure_message,
         version=version)
     bundle = _bundle_status(runtime)
     bundle_checks = {
@@ -565,7 +577,8 @@ def preflight(path, *, peer_id=None, project_id=None, runtime_probe=inspect_runt
             add('forwarding', 'pass', 'endpoint_reachable', 'The forwarded endpoint is reachable.', **safe)
             add('pairing', 'fail', 'peer_identity_or_credential', 'The peer identity or pairing credential does not match; verify both invitation imports.', **safe)
         elif reachable.get('code') in ('unsupported_codex_schema', 'unsupported_codex_version',
-                'runtime_bundle_incomplete', 'runtime_probe_failed', 'codex_not_found', 'authentication_required', 'not_logged_in'):
+                'runtime_bundle_incomplete', 'runtime_probe_failed', 'runtime_not_executable', 'runtime_exec_format',
+                'codex_not_found', 'authentication_required', 'not_logged_in'):
             auth_failure = reachable.get('code') in ('authentication_required', 'not_logged_in')
             add('forwarding', 'pass', 'endpoint_reachable', 'The other Bridge responds through the configured forward.', **safe)
             add('pairing', 'pass', 'peer_credential_accepted', 'The peer accepted the credential before checking its runtime.', **safe)

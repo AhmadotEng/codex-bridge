@@ -286,6 +286,20 @@ class OnboardingTests(unittest.TestCase):
         self.assertNotIn('PRIVATE-PATH', str(failure.exception))
         self.assertEqual(self.a.read_bytes(), before)
 
+    def test_native_runtime_permission_and_format_errors_are_actionable_and_sanitized(self):
+        self.initialize()
+        before = self.a.read_bytes()
+        for code in ('runtime_not_executable', 'runtime_exec_format'):
+            probe = lambda _: {'ready': False, 'errors': [{'code': code, 'message': 'PRIVATE-PATH'}]}
+            result = onboarding.preflight(self.a, runtime_probe=probe, runner=local_runner,
+                local_call=lambda *a, **k: {'ok': True})
+            self.assertIn(code, [row['code'] for row in result['checks']])
+            self.assertNotIn('PRIVATE-PATH', json.dumps(result))
+            with self.assertRaises(BridgeError) as failure:
+                onboarding.setup(self.a, codex=sys.executable, batch=True, runtime_probe=probe)
+            self.assertEqual(failure.exception.code, code)
+            self.assertEqual(self.a.read_bytes(), before)
+
     def test_runtime_path_repair_changes_only_selected_path(self):
         self.paired()
         cfg = cli.read(self.a)
@@ -379,6 +393,21 @@ class OnboardingTests(unittest.TestCase):
             self.assertEqual(item['category'], expected)
             self.assertNotIn(str(self.root), json.dumps(result))
 
+    def test_new_transport_does_not_require_unrelated_disabled_peer_files(self):
+        self.paired()
+        cfg = cli.read(self.a)
+        cfg['peers']['old-peer'] = {'enabled': False}
+        cfg['ssh_transports'] = {'old-peer': {'enabled': False,
+            'identity_file': str(self.root / 'removed-old-key'), 'owner_extension': 'preserve'}}
+        cli.save(self.a, cfg)
+        identity, known = self.root / 'current-key', self.root / 'current-known-hosts'
+        identity.write_text('fixture'); known.write_text('fixture')
+        onboarding.transport_config(self.a, peer_id='computer-b', batch=True,
+            settings={'ssh_host': '127.0.0.1', 'username': 'fixture', 'ssh_exe': sys.executable,
+                'identity_file': str(identity), 'known_hosts_file': str(known), 'host_key_alias': 'fixture'})
+        self.assertEqual(cli.read(self.a)['ssh_transports']['old-peer'], cfg['ssh_transports']['old-peer'])
+        self.assertTrue(cli.read(self.a)['ssh_transports']['computer-b']['enabled'])
+
     def test_preflight_does_not_use_another_peers_legacy_ssh_route(self):
         self.paired()
         cfg = cli.read(self.a)
@@ -451,28 +480,46 @@ class OnboardingTests(unittest.TestCase):
         with mock.patch.object(cli, 'start_daemon') as start:
             result = onboarding.offer_autostart(self.a, {'ok': True}, platform='nt',
                 prompt=lambda _: 'yes', read_settings=lambda _: {'components': {}}, register=register)
-        register.assert_called_once_with(self.a, component='auto')
+        register.assert_called_once_with(self.a, component='daemon')
         start.assert_not_called()
         self.assertFalse(result['autostart']['started_now'])
         register.reset_mock()
         prompt = mock.Mock(side_effect=AssertionError('Existing startup must not be silently replaced'))
         result = onboarding.offer_autostart(self.a, {'ok': True}, platform='nt', prompt=prompt,
-            read_settings=lambda _: {'components': {}, 'transports': {'computer-b': {'enabled': True}}}, register=register)
+            read_settings=lambda _: {'components': {'daemon': {'enabled': True}}, 'transports': {'computer-b': {'enabled': True}}}, register=register)
         self.assertTrue(result['autostart']['existing_registration_preserved'])
         register.assert_not_called()
         prompt.assert_not_called()
 
-    def test_startup_is_not_offered_before_pairing_project_or_on_other_platforms(self):
+    def test_waiting_startup_offered_without_pairing_on_windows_and_linux(self):
         self.initialize()
-        prompt = mock.Mock(side_effect=AssertionError('Startup is not ready to be offered'))
+        for platform in ('nt', 'posix', 'linux'):
+            prompt = mock.Mock(return_value='yes')
+            register = mock.Mock(return_value={'enabled': True, 'started_now': False})
+            result = onboarding.offer_autostart(self.a, {'ok': True}, platform=platform, prompt=prompt,
+                read_settings=lambda _: {'components': {}}, register=register)
+            register.assert_called_once_with(self.a, component='daemon')
+            self.assertIn('waiting Bridge daemon', prompt.call_args.args[0])
+            self.assertFalse(result['autostart']['started_now'])
+        prompt = mock.Mock()
         register = mock.Mock()
-        result = onboarding.offer_autostart(self.a, {'ok': True}, platform='nt', prompt=prompt,
-            read_settings=lambda _: {'components': {}}, register=register)
-        self.assertFalse(result['autostart']['offered'])
-        result = onboarding.offer_autostart(self.a, {'ok': True}, platform='posix', prompt=prompt, register=register)
-        self.assertNotIn('autostart', result)
+        result = onboarding.offer_autostart(self.a, {'ok': True}, platform='darwin', prompt=prompt, register=register)
         prompt.assert_not_called()
         register.assert_not_called()
+
+    def test_existing_transport_startup_does_not_skip_waiting_daemon_offer(self):
+        self.initialize()
+        register = mock.Mock(return_value={'enabled': True, 'started_now': False})
+        onboarding.offer_autostart(self.a, {'ok': True}, platform='nt', prompt=lambda _: 'yes',
+            read_settings=lambda _: {'components': {}, 'transports': {'old-peer': {'enabled': True}}}, register=register)
+        register.assert_called_once_with(self.a, component='daemon')
+
+    def test_pair_later_still_offers_waiting_startup(self):
+        self.initialize()
+        with mock.patch.object(onboarding, 'offer_autostart', return_value={'offered': True}) as offer:
+            result = onboarding.continue_setup(self.a, {}, prompt=lambda _: '')
+        offer.assert_called_once()
+        self.assertTrue(result['offered'])
 
     @unittest.skipUnless(os.name == 'nt', 'Windows entry point')
     def test_setup_launcher_parses_without_executing_installation(self):

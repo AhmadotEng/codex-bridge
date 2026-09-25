@@ -22,13 +22,13 @@ class PortableInstallTests(unittest.TestCase):
     def test_allowlist_and_existing_configuration_preserved(self):
         source = self.root/"source"; target = self.root/"installed"/"codex-bridge"
         for name in installer.REQUIRED:
-            file = source/name; file.parent.mkdir(parents=True, exist_ok=True); file.write_text("fixture")
+            file = source/name; file.parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(ROOT/name, file)
         for name in (".git/config", "config.json", "codex_bridge/extra_private_module.py", "private_notes.txt", "state/data.json", "Codex-Bridge-Friend-Runtime-Repair.md"):
             file = source/name; file.parent.mkdir(parents=True, exist_ok=True); file.write_text("private")
         guide = source/'docs'/'RUNTIME.md'; guide.parent.mkdir(parents=True); guide.write_text('Generic runtime repair')
-        target.mkdir(parents=True)
+        installer.install(source, target, self.root/'private'/'config.json')
         local = target/"config.json"; local.write_text("owner config")
-        installer.install(source, target, local)
+        installer.install(source, target, self.root/'private'/'config.json')
         self.assertEqual(local.read_text(), "owner config")
         self.assertFalse((target/".git").exists())
         self.assertFalse((target/"codex_bridge"/"extra_private_module.py").exists())

@@ -1,5 +1,23 @@
 # Verification
 
+## 0.3.2-rc.1 waiting/connection candidate
+
+This prerelease changes connection management and is **experimental**. Earlier working Windows/Linux sessions below used the legacy route and do not verify the new two-candidate selection protocol. Assess candidate source tests, package installation, real receiving authentication, model tasks, and OS startup/reboot separately.
+
+### Maintainer verification on 2026-09-25
+
+- **Windows / Python 3.11:** 331 isolated tests ran successfully; seven platform-specific tests were skipped. This includes 31 manager protocol cases and seven two-Bridge HTTP integration cases. Tests cover simultaneous selection, lost acknowledgments, opposite-origin reconnection without task replay, stop/resume, cancellation, revocation, pending results, work arriving during idle drain, interrupted retry budgets, and acknowledged-progress requirements. SSH carriers and model execution are simulated in these protocol tests.
+- **Actual Windows OpenSSH loopback:** separate temporary receivers and dedicated test keys passed A-origin, B-origin, and simultaneous initiation. Both authenticated Bridge directions worked over the selected tunnel, healthy reuse created no second client, and loser cleanup retained one client. Fake-adapter tasks and deduplication worked both ways. Authenticated shell-command and SFTP session requests were denied. All test receivers/clients exited and no isolated listeners remained. This is real SSH on one Windows computer, not a two-computer Linux or native-model test.
+- **Actual Windows task invocation:** an isolated hidden, limited, interactive-owner daemon task was manually invoked and observed for 126 seconds. It retained queued work and a saved result with zero SSH launches, zero connection demands, and zero connection children. Its exact task and owned processes were removed after the check. This exercised Task Scheduler startup, not an actual sign-out/sign-in or reboot. A harmless test adapter replaced account/model execution.
+- **Packaged Windows installation:** the extracted ZIP installed into a separate directory, preserved a pre-existing private configuration, matched all 42 payload hashes, and exposed 21 MCP tools while its daemon was absent. The check did not register an MCP server globally or replace the live installation.
+- **Existing deployment migration:** the unwanted legacy transport startup and offline supervisors were stopped while the same daemon, pairing, project scopes, and saved sessions stayed available. Saved legacy routes remain available for a coordinated migration. This did not promote either endpoint to the new protocol.
+
+Linux systemd ownership/rollback is covered with a simulated user manager. Real Linux receiving access, new-protocol Linux tasks, and actual Linux login/reboot observation remain pending. GitHub Actions results are separate per-commit evidence, not a substitute for those deployment checks. Detailed local reports retain source hashes; private key/configuration directories and machine-specific evidence are excluded from release bundles.
+
+Installer checks use only temporary directories: Windows setup and bridge wrappers select installed code even with a shadow `codex_bridge` in the caller's directory, while retaining relative argument semantics. Tests cover incomplete/invalid sources, unrelated destinations, explicit upgrade requirements, byte-preserved matching MCP launchers, conflicting configurations, staged rollback, unchanged private state, and zipapp integrity. The two OS package formats are generated from the same allowlist, compared byte-for-byte against their payload manifest, rebuilt for determinism, and checked for exclusion of unselected private fixture files. These checks do not modify a live account, service, pairing, or route.
+
+The new managed release still needs exact-candidate real Windows/Linux acceptance: each initiating direction, simultaneous initiation and loss of acknowledgments, native task/result deduplication after opposite-origin reconnection, bounded recovery and offline waiting startup, and actual owner sign-in/reboot behavior. Service registration/configuration alone is not reboot verification. See [connection behavior and migration](CONNECTIONS.md).
+
 ## Isolated automated tests
 
 Run from the repository root:
@@ -95,10 +113,51 @@ Assess its isolated tests and the CI result for the published commit separately 
 
 ## Remaining deployment verification
 
+### Unpublished Linux launcher preview (0.3.2-dev.0)
+
+The source preview adds `scripts/setup.py`, `scripts/setup.sh`, and a deterministic Python `.pyz` builder/bootstrap. Windows regression testing completed **244 tests with seven platform-specific skips**. Source review and focused launcher tests cover configuration preservation, refusal to overwrite a different installation, payload integrity/path validation, bounded reads, and sanitized diagnostics.
+
+Before the owner requested stopping further VM testing, an isolated Alpine 3.24.2 x86_64 guest with Python 3.14.7 completed the portable installer suite (five passed, one Windows-only skip), version/schema/App Server initialization against the complete verified official Codex 0.153.4 Linux musl package, and actual bidirectional OpenSSH loopback forwarding with Windows. These checks used no Codex account or model turns. The broader Linux suite and one-file lifecycle checks were subsequently interrupted; **they are not complete Linux acceptance results**. The disposable VM and its owned listeners were stopped, and existing deployments were unchanged.
+
+The bundled zsh in that Codex package requires a glibc loader absent on the Alpine guest. Version/schema success does not establish native command or sandbox readiness. No libc or sandbox workaround was applied. The later Fedora checks below describe a different runtime and system; they do not establish Alpine or ARM64 compatibility. Desktop integration and optional Linux login startup still require verification. See [LINUX.md](LINUX.md). No preview commit, push, or release publication was performed.
+
+### Friend-reported Fedora validation (2026-09-24)
+
+The connection coordinator relayed the friend's results for the delivered **0.3.2-dev.0** preview on **Fedora 44 x86_64**, **Python 3.14.7**, and locally signed-in **Codex CLI 0.155.1**. These are **friend-reported results, not host-reproduced verification**:
+
+- Supplied package hashes and all 37 launcher payload files matched.
+- The test suite reported 230 passes and 14 Windows-specific skips.
+- Setup, repeated setup, daemon stop, and restart passed; the local daemon listened on loopback.
+- MCP initialization, listing 16 tools, and `session_list` passed.
+- A real native App Server command ran with bundled zsh, a read-only sandbox, and network disabled. The friend reported independently checking a matching output SHA-256.
+
+At the time of the report, no peers, projects, or Bridge SSH routes were configured, and the Linux SSH server was inactive. Tailscale connectivity was already complete according to the owner; installation or enrollment was not outstanding. The coordinator retained the Linux computer's chosen peer identity while preparing a separate pairing, preserving the existing Windows deployment and conversations.
+
+This initial report established a reported local command check; remote Bridge tasks had not yet been exercised. The subsequent live verification below supersedes that connection status. Desktop behavior, ARM64, and Linux login/reboot startup remain outside this report. Personal identifiers, private paths, invitations, and detailed command output are kept out of these repository notes.
+
+### Live Windows-to-Linux verification (2026-09-25 UTC)
+
+The connection coordinator subsequently verified the existing **Windows 0.1** deployment against the delivered **Fedora 0.3.2-dev.0** preview and locally signed-in **Codex CLI 0.155.1**. The repository maintainer reviewed the saved report; this documentation update did not rerun its tests or change either deployment.
+
+- Ordinary SSH over Tailscale authenticated with a pinned host key, reciprocal Bridge invitations were imported, and the scoped test project became available.
+- A Windows-originated Bridge task ran a real native command on Linux. App Server recorded command completion with exit code zero; dialogue completion alone was not treated as proof.
+- A selected 119-byte file completed a Windows-to-Linux-to-Windows round trip. Returned bytes and SHA-256 matched the source.
+- A follow-up in the same Linux conversation recalled the requested context marker and exact file hash without tools. The owned App Server closed after both turns; no duplicate test conversation was created.
+- An initial zsh here-document failed while attempting a temporary file in the read-only sandbox. The model changed the command to `python3 -c` and succeeded without relaxing permissions or sandbox policy.
+
+The older Windows installation and its existing peers, conversations, and routes were preserved. A separate transport-only supervisor provided the new route; it did not run another Bridge daemon. SSH access for this pairing is restricted to forwarding, not an administrative shell or SFTP.
+
+TCP port 22 initially timed out. It became reachable after the owner confirmed invitation acceptance and the coordinator refreshed the Tailscale network map. The `ShareeNode:true` status field remained present during success, so that field alone does **not** establish blocked sharing. The successful SSH and authenticated Bridge checks establish reachability; these observations do not isolate the cause of the earlier timeout.
+
+**Still unverified:** a reverse-originated model task from the friend's ordinary Codex, Linux or new-route automatic startup and reboot persistence, and Linux desktop conversation behavior. Linux services and the new Windows route had no automatic startup configured during this check. The successful artifact round trip does not prove a reverse-originated model task. Transfers to the older Windows host remain limited to 8 MiB each. This is one existing mixed-version deployment, not acceptance of a fresh two-user public installation or any game project.
+
+### Deployment checks still required
+
 - Two new users completing the public guide with separate accounts and their own SSH connection.
 - Actual two-computer reboot/login acceptance of the integrated 0.3 package.
 - Separate sign-out/sign-in, screen lock/unlock, and sleep/wake cycles; these were not established by the earlier reboot tests.
-- Real authenticated model turns, desktop chat behavior, and host sandbox policies on macOS/Linux.
+- Real authenticated model turns on macOS, broader Linux runtime/sandbox coverage beyond the Fedora check above, and desktop chat behavior on macOS/Linux.
+- Reverse-originated Linux model tasks and Linux/new-route startup and reboot persistence for the preview pairing.
 - Behavioral testing of additional schema-compatible Codex releases.
 - Desktop notifications and automatic sidebar refresh; neither is promised by Bridge.
 

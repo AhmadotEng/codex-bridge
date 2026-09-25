@@ -1,5 +1,7 @@
 # Onboarding plan: implementation status
 
+This records the earlier onboarding milestones. The 0.3.2 prerelease supersedes its startup/one-origin transport policy with [waiting startup and on-demand connections](CONNECTIONS.md), separate [Windows/Linux setup](SETUP.md), and Linux user-service support. Check [current test evidence](TESTING.md) for what has actually been verified.
+
 ## Target experience
 
 Two people install the same connector, sign into Codex separately, pair their computers, and choose project folders. They exchange tasks and results without manually relaying every prompt. Another project needs workspace selection and a new session, not another installation.
