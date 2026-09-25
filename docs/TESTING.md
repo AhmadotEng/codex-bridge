@@ -2,6 +2,8 @@
 
 ## 0.3.2-rc.6: tested deployments on September 25, 2026
 
+**Publication is held following a later live recovery failure.** After the successful activation/reuse checks below, an unplanned idle carrier loss occurred. A single explicit connection request opened a new SSH child but retained the previous candidate/generation and returned `invalid_request`; its request record remained unfinished. Authenticated traffic became available again, but the physical-child selection and recovery bookkeeping did not pass acceptance. The planned Linux cycle was not authorized and exited without mutation. A source correction and independent review are in progress; the existing candidate assets remain unchanged and unpublished. The original SSH exit cause is not established by the available logs. The earlier passes below remain scoped to what they tested.
+
 rc.6 retains pending artifact-abort acknowledgments as active work. An explicit cancellation retry uses the original transfer ID and clears its pending state only after a valid terminal acknowledgment. Concurrent cancellation replies cannot overwrite a completed result, and cancellation during transfer creation retains the returned transfer ID for reconciliation. This adds no automatic artifact retry or dialing policy. After revocation, local cleanup of retained SSH children remains possible without altering pending work or restoring remote access.
 
 The exact candidate pins source revision `b62b9081441ef347cad945cdd735a65b0646ec14`. Its matching Windows/Linux installers contain the same 43 payload files. Source, package and live results are separate evidence:
