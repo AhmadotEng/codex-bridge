@@ -1,12 +1,29 @@
 # Verification
 
-## 0.3.2-rc.4 Windows startup candidate
+## 0.3.2-rc.4 startup and live-upgrade evidence
 
 The live rc.3 rollout revealed that Windows took about 2.05 seconds to report an explicitly refused loopback connection, exceeding the startup probe's two-second limit. Independent isolated probes reproduced a timeout at two seconds and WinError 10061 after approximately 2.03–2.05 seconds when given more time. The previous live code and exact configuration were restored; all 662 pre-window records, saved artifacts, startup registration and the existing SSH carrier were preserved.
 
-rc.4 gives Windows startup probes five seconds; other platforms retain two seconds. Only an explicit connection refusal allows a launch. Timeouts, failed authentication and malformed responses still prevent a second daemon. Readiness probes and sleeps are capped to the remaining 30-second readiness window. Focused tests use real isolated sockets for refused, healthy, slow, wedged and unauthorized endpoints, with launches mocked; actual packaged Windows daemon and scheduled-task acceptance remain a separate required gate before another live attempt or publication.
+rc.4 gives Windows startup probes five seconds; other platforms retain two seconds. Only an explicit connection refusal allows a launch. Timeouts, failed authentication and malformed responses still prevent a second daemon. Readiness probes and sleeps are capped to the remaining 30-second readiness window. Focused tests use real isolated sockets for refused, healthy, slow, wedged and unauthorized endpoints, with launches mocked. The actual packaged and deployed lifecycle checks below provide separate evidence.
 
 Windows/Python 3.11 source verification completed with **388 tests: 380 passed and eight platform skips**, in 130.446 seconds. The 43 focused CLI/entrypoint tests passed before the full suite. These results verify the corrected probe logic and preserved rejection behavior; they do not substitute for the packaged or live upgrade checks.
+
+The functional candidate pins source revision `b559fa0ffd228699f127b9d2e704c275436bf7e4`. Its final correction changes only a macOS test fixture. All seven [Windows, Ubuntu and macOS CI jobs for that revision](https://github.com/AhmadotEng/codex-bridge/actions/runs/36164294180) passed.
+
+| Check | Observed result |
+| --- | --- |
+| Packaged installation | Matching Windows/Linux 43-file payloads; installation, reinstallation, upgrade, private fixture configuration preservation and 21 MCP tools passed. |
+| Actual Windows live upgrade | Passed on September 25, 2026 at 17:18:57 UTC: rc.4 started once through the existing owner-login task; authenticated local readiness and legacy Linux availability passed. |
+| Windows preservation | All 701 saved record bodies and 248 artifact blobs preserved. Pairing, project scopes, MCP launcher, v1 startup metadata/task XML and the existing SSH carrier stayed intact. Only the already-disabled legacy transport gained its required peer ID field. |
+| Actual Windows startup lifecycle | Isolated background and existing-v1 scheduled-task paths passed status, repeated-start process reuse, normal stop and cleanup. The live upgrade also used its existing task. These were not sign-in/reboot tests. |
+| Post-upgrade native execution | A new bidirectional native-command and file proof is in progress. No result is assumed here; subsequent results will be recorded in the release notes. |
+| Exact rc.4 Linux acceptance | 388 source tests: 372 passed, 16 Windows-specific skips, no failures. All 14 helper fixtures passed. Installation, reinstallation, upgrade, 21 MCP tools and actual daemon start/status/reuse/stop passed. Live Linux remains on rc.2 pending coordinated promotion. |
+
+The initial Windows preservation checker encountered an inherited PowerShell module-path conflict. A separate read-only checker omitted that variable from its own child environment and passed all 34 checks. Installed Bridge code and global environment settings were unchanged; no additional daemon start or rollback was needed.
+
+The Linux service implementation is byte-identical to the accepted rc.3 implementation. The shared CLI readiness changes were separately reviewed and exercised on Linux; the earlier 122-second real user-service test was not repeated. Fresh rc.4 user-service activation and actual login/reboot remain unverified.
+
+These results concern the existing deployments and their preserved legacy route. Managed initiation from both computers, simultaneous initiation, opposite-origin reconnection with task deduplication, and actual sign-in/reboot recovery remain separate pending checks. The final release contains updated documentation; its runtime bytes must match the accepted candidate before publication. The release manifest and `SHA256SUMS` identify the final files.
 
 ## 0.3.2-rc.3 Linux user-unit correction
 
@@ -18,7 +35,7 @@ An initial unpublished rc.3 candidate passed Fedora's parser check but its actua
 
 ### Completed corrected-candidate acceptance
 
-**Subsequent live Windows rollout did not pass:** upgrading the existing host stopped at `local_endpoint_unverified` before the daemon was launched. The coordinator verified no local listener or daemon/runner lock and began the reviewed code-only recovery, preserving the current database/artifacts and existing SSH carrier. The short readiness probe is being investigated. The isolated installer/CI and Linux results below are not a successful Windows live-upgrade claim. rc.3 Windows upgrades are held pending a verified follow-up; published artifact bytes remain unchanged.
+**Historical rc.3 Windows rollout failed:** upgrading the existing host stopped at `local_endpoint_unverified` before daemon launch. The previous code and configuration were restored while retaining the current database, artifacts and SSH carrier. The cause and successful rc.4 follow-up are recorded above. The results below do not claim a successful rc.3 Windows upgrade; its published artifact bytes remain unchanged.
 
 The published [rc.3 release](https://github.com/AhmadotEng/codex-bridge/releases/tag/v0.3.2-rc.3) pins source revision `2e3283bd46a4008fb0edcd4b9a44138fab5d7661`. Windows ran 378 tests with 370 passes and eight platform skips. The receiving Fedora 44 owner worker ran the exact candidate under Python 3.14.7 and systemd 259: 378 tests, 363 passes, 15 platform skips, zero failures. All seven [CI jobs for that revision](https://github.com/AhmadotEng/codex-bridge/actions/runs/36161253251) passed. Windows/Linux installer payloads matched across all 43 selected files; all seven published downloads were independently hash-verified.
 
