@@ -1,5 +1,13 @@
 # Verification
 
+## 0.3.2-rc.7: recovery correction under acceptance
+
+This development candidate requires both endpoints to prove that the originating daemon retains the exact live SSH child. A replacement listener cannot revive an old connection generation. The correction also prevents a maintenance tick from removing a recovery episode while selection is finalizing, and keeps reconciliation failures within the original bounded attempt budget.
+
+Independent review reproduced the rc.6 failures and accepted the correction. All 51 connection tests, 11 HTTP integration tests and 22 owned-child cleanup tests passed. Coverage includes replacement after either origin's carrier dies, preserving a surviving remote carrier after the other daemon restarts, lost reconciliation replies, concurrent maintenance, cleanup failure, incompatible peers and exact task-request replay during recovery. A newly committed generation starts a fresh idle interval; a restarted receiver initializes its missing interval once after verifying the retained route. Reusing a healthy connection or replaying its commit does not extend that interval. These are isolated tests, not live Windows/Linux recovery acceptance.
+
+Both computers must advertise `retained_ssh_owner_v1`; upgrading only one endpoint is insufficient. Full candidate, package, CI and coordinated deployment evidence will be recorded separately. The existing rc.6 runtime and its immutable candidate assets are not silently replaced by these source changes. The physical cause of the earlier SSH exit remains unknown.
+
 ## 0.3.2-rc.6: tested deployments on September 25, 2026
 
 **Publication is held following a later live recovery failure.** After the successful activation/reuse checks below, an unplanned idle carrier loss occurred. A single explicit connection request opened a new SSH child but retained the previous candidate/generation and returned `invalid_request`; its request record remained unfinished. Authenticated traffic became available again, but the physical-child selection and recovery bookkeeping did not pass acceptance. The planned Linux cycle was not authorized and exited without mutation. A source correction and independent review are in progress; the existing candidate assets remain unchanged and unpublished. The original SSH exit cause is not established by the available logs. The earlier passes below remain scoped to what they tested.

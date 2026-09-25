@@ -17,7 +17,7 @@ Let two people's Codex installations exchange project tasks, replies, and select
 
 For an existing installation, finish active work and follow the [upgrade and rollback instructions](docs/ADVANCED.md). Preserve private configuration and saved state when replacing the code.
 
-Use local Python 3.11+, a complete Codex installation signed into your own account, and OpenSSH. Download and extract the matching installer from the [published releases](https://github.com/AhmadotEng/codex-bridge/releases). Compare its SHA-256 with that release's `SHA256SUMS`. The rc.6 development candidate is not published: live testing found a connection-recovery defect that is being corrected.
+Use local Python 3.11+, a complete Codex installation signed into your own account, and OpenSSH. Download and extract the matching installer from the [published releases](https://github.com/AhmadotEng/codex-bridge/releases). Compare its SHA-256 with that release's `SHA256SUMS`. Development candidate rc.7 corrects the recovery defects found in the unpublished rc.6 candidate; coordinated deployment and live acceptance are still pending. Upgrade both computers before enabling rc.7 managed connections.
 
 | Download | Run inside the extracted `codex-bridge` folder |
 | --- | --- |
@@ -26,7 +26,7 @@ Use local Python 3.11+, a complete Codex installation signed into your own accou
 
 Both contain the same Bridge source and guides. Setup creates this computer's private configuration and registers its MCP tools. It does not copy accounts, install SSH services, or alter unrelated routes. The default location is `~/plugins/codex-bridge`; existing settings are preserved and conflicts are reported.
 
-**Experimental prerelease:** both rc.6 deployments, initial managed activation and tunnel reuse passed. A later carrier loss exposed incorrect connection selection during recovery and an internal error; the successor build and remaining connection tests are in progress. Earlier published releases are not evidence that this recovery behavior is fixed. Actual sign-in/reboot acceptance remains unverified. See the [test evidence](docs/TESTING.md).
+**Experimental prerelease:** both rc.6 deployments, initial managed activation and tunnel reuse passed. A later carrier loss exposed incorrect connection selection during recovery and an internal error. The rc.7 correction passed focused review and isolated tests; live recovery and the remaining connection tests are pending. Earlier published releases are not evidence that this recovery behavior is fixed. Actual sign-in/reboot acceptance remains unverified. See the [test evidence](docs/TESTING.md).
 
 Follow the **[two-computer setup guide](docs/SETUP.md)** to exchange invitations, authorize SSH in both directions, and choose project folders. Select the same project ID on both computers. Waiting startup is optional; persistent connections are off by default.
 

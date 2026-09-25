@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import socket
 import time
+import types
 import unittest
 import uuid
 
@@ -73,6 +74,11 @@ class ConnectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                             if remote: self.carrier_writers.get(carrier_key, set()).discard(remote)
                     listeners.append(await asyncio.start_server(forward, '127.0.0.1', self.lanes[node][source]))
                 self.carriers[(node, candidate['attempt_id'])] = listeners
+                attempt = candidate['attempt_id']
+                process = types.SimpleNamespace(poll=lambda: None if (node, attempt) in self.carriers else 255)
+                manager.owners[(peer, attempt)] = (types.SimpleNamespace(process=process), None)
+                manager.bridge.store.put('connection_children', attempt,
+                    {'peer_id': peer, 'attempt_id': attempt, 'closed': False})
                 await manager._verify(peer, candidate)
 
             async def close_owner(peer, attempt, node=node):
@@ -87,10 +93,15 @@ class ConnectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 for task in channels: task.cancel()
                 await asyncio.gather(*channels, return_exceptions=True)
                 await asyncio.gather(*(server.wait_closed() for server in listeners))
+                manager = self.bridges[node].connections
+                manager.owners.pop((peer, attempt), None)
+                child = manager.bridge.store.get('connection_children', attempt)
+                if child:
+                    child['closed'] = True; manager.bridge.store.put('connection_children', attempt, child)
 
             async def close_losers(peer, winner, node=node, close_owner=close_owner):
-                for origin, attempt in list(self.carriers):
-                    if origin == node and attempt != winner: await close_owner(peer, attempt)
+                for owner_peer, attempt in list(self.bridges[node].connections.owners):
+                    if owner_peer == peer and attempt != winner: await close_owner(peer, attempt)
 
             manager._open_candidate = open_candidate
             manager._close_owner = close_owner
@@ -200,7 +211,9 @@ class ConnectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(entered.wait(), 10)
             # Replaying the old commit across this candidate must also not
             # authorize a fresh sweep that includes this new SSH carrier.
-            await b.connections._receive_commit('alpha', {'decision': chosen['decision']})
+            with self.assertRaises(BridgeError) as refused:
+                await b.connections._receive_commit('alpha', {'decision': chosen['decision']})
+            self.assertEqual(refused.exception.code, 'carrier_unavailable')
             await asyncio.sleep(.65)
             self.assertTrue(any(origin == 'beta' for origin, _ in self.carriers),
                             'An old commit timer killed a later candidate before preparation')
@@ -290,3 +303,42 @@ class ConnectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['stages']['remote_bridge']['state'], 'fail')
         self.assertEqual(result['stages']['remote_codex']['state'], 'not_checked')
         self.assertEqual(result['error']['code'], 'peer_unavailable')
+
+    async def active_task_recovery(self, origin):
+        peer = 'beta' if origin == 'alpha' else 'alpha'
+        initial = await self.connect(origin)
+        bridge, receiver = self.bridges[origin], self.bridges[peer]
+        session = await self.session('second' if origin == 'beta' else 'first')
+        sid, rid = session['session_id'], request_id()
+        self.adapters[peer].block = True
+        intent = {'session_id': sid, 'request_id': rid, 'prompt': 'Harmless wait; execute this saved request once'}
+        await bridge.op_task_send(intent)
+        for _ in range(100):
+            running = receiver.store.get('incoming', rid)
+            if running and running['status'] == 'running': break
+            await asyncio.sleep(.01)
+        self.assertEqual(running['status'], 'running')
+        thread, turn = running['thread_id'], running['turn_id']
+        old_id = initial['decision']['connection_id']
+        await bridge.connections._close_owner(peer, old_id)
+        bridge.connections.last_probe.clear()
+        await bridge.connections.maintenance()
+        result = await bridge.connections.demands[peer]
+        self.assertTrue(result['available'], result)
+        self.assertEqual(result['generation'], initial['generation'] + 1)
+        self.assertNotEqual(result['decision']['connection_id'], old_id)
+        self.assertEqual(result['episode']['attempts'], 1)
+        self.assertEqual(receiver.store.get('incoming', rid)['turn_id'], turn)
+        self.adapters[peer].events[(thread, turn)].set()
+        completed = await self.completed(bridge, sid, rid)
+        await bridge.op_task_send(intent)
+        replayed = await self.completed(bridge, sid, rid)
+        self.assertEqual(completed['result'], replayed['result'])
+        self.assertEqual(len(self.adapters[peer].runs), 1)
+        self.assertFalse(bridge.connection_activity(peer)); self.assertFalse(receiver.connection_activity(origin))
+
+    async def test_active_task_same_origin_recovery_alpha(self):
+        await self.active_task_recovery('alpha')
+
+    async def test_active_task_same_origin_recovery_beta(self):
+        await self.active_task_recovery('beta')

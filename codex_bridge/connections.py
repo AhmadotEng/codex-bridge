@@ -20,12 +20,13 @@ import time
 import uuid
 from pathlib import Path
 
-from .core import BridgeError, canonical, digest, identifier, now
+from .core import BridgeError, VERSION, canonical, digest, identifier, now
 from .transport import configured_transports, transport_args, _spawn_ssh, _BoundedErrors
 from . import processes
 
 
 CAPABILITY = 'on_demand_tunnel_v1'
+OWNER_CAPABILITY = 'retained_ssh_owner_v1'
 CONTROL_PREFIX = 'peer.connection_'
 STAGES = ('local_bridge', 'network_ssh', 'ssh_authentication', 'forwarding',
           'remote_bridge', 'remote_codex')
@@ -225,6 +226,43 @@ class ConnectionManager:
     def _activity(self, peer):
         return bool(self.inflight.get(peer, 0) or self.bridge.connection_activity(peer))
 
+    def _demand_active(self, peer):
+        task = self.demands.get(peer)
+        return bool(task and not task.done())
+
+    def _owned_alive(self, peer, candidate):
+        # Only a retained child handle is ownership. A journal PID or a newly
+        # reopened listener at the same address cannot revive an older carrier.
+        key = (peer, candidate['attempt_id'])
+        item = self.owners.get(key); closing = self.owner_closures.get(key)
+        return bool(item and key not in self.cleanup_failures and not (closing and not closing.done())
+                    and item[0].process.poll() is None)
+
+    async def _carrier_alive(self, peer, candidate):
+        self._validate_candidate(peer, candidate)
+        if candidate['initiator'] == self.bridge.node_id:
+            return self._owned_alive(peer, candidate)
+        try:
+            proof = await self._rpc(peer, 'owner', {'candidate': candidate}, candidate, timeout=1)
+        except BridgeError as exc:
+            if exc.code in ('peer_unavailable', 'connection_timeout'): return False
+            raise
+        except (asyncio.TimeoutError, OSError): return False
+        if proof.get('ownership_proof') != OWNER_CAPABILITY:
+            raise BridgeError('capability_missing', 'The peer must support exact retained SSH owner verification')
+        return (proof.get('peer_id') == peer and proof.get('attempt_id') == candidate['attempt_id']
+                and proof.get('alive') is True)
+
+    async def _require_carrier(self, peer, candidate):
+        if not await self._carrier_alive(peer, candidate):
+            raise BridgeError('carrier_unavailable', 'The selected SSH origin no longer owns this exact live carrier', True)
+
+    def _same_decision(self, peer, decision, states=('committed',)):
+        state = self._state(peer); current = state.get('decision') or {}
+        return bool(not state['stop_requested'] and current.get('state') in states
+                    and current.get('connection_id') == decision.get('connection_id')
+                    and current.get('generation') == decision.get('generation'))
+
     def _persistent(self, peer):
         # The saved startup choice is the one authority. Merely editing a
         # connection example's `persistent` field cannot authorize dialing.
@@ -308,7 +346,7 @@ class ConnectionManager:
     async def peer_rpc(self, method, params, actor):
         self._settings(actor)
         action = method.removeprefix(CONTROL_PREFIX)
-        allowed = {'probe', 'callback', 'propose', 'prepare', 'commit', 'decision', 'health',
+        allowed = {'probe', 'callback', 'propose', 'prepare', 'commit', 'decision', 'health', 'owner',
                    'abort', 'drain', 'undrain', 'close', 'disconnect'}
         if action not in allowed or not isinstance(params, dict):
             raise BridgeError('scope_denied', 'Unknown connection control operation')
@@ -325,8 +363,17 @@ class ConnectionManager:
                              canonical(signed).encode(), hashlib.sha256).hexdigest()
         return {'result': result, 'signature': signature}
 
+    async def _receive_owner(self, peer, p):
+        candidate = self._validate_candidate(peer, p.get('candidate'))
+        if candidate['initiator'] != self.bridge.node_id:
+            raise BridgeError('protocol_error', 'Only the carrier origin can attest retained child ownership')
+        return {'peer_id': self.bridge.node_id, 'attempt_id': candidate['attempt_id'],
+                'alive': self._owned_alive(peer, candidate), 'version': VERSION,
+                'ownership_proof': OWNER_CAPABILITY}
+
     async def _verify(self, peer, candidate, generation=0):
         self._validate_candidate(peer, candidate)
+        await self._require_carrier(peer, candidate)
         nonce = secrets.token_hex(32)
         key = (peer, candidate['attempt_id'], generation)
         self.challenges[key] = {'nonce': nonce, 'expires': time.monotonic() + 30,
@@ -334,10 +381,13 @@ class ConnectionManager:
         try:
             answer = await self._rpc(peer, 'probe', {'candidate': candidate, 'challenge': nonce,
                  'generation': generation, 'issuer_boot': self.boot}, candidate)
+            if answer.get('ownership_proof') != OWNER_CAPABILITY:
+                raise BridgeError('capability_missing', 'Both peers must support retained SSH owner verification')
             challenge = self.challenges[key]
             if (answer.get('peer_id') != peer or answer.get('challenge') != nonce
                     or not challenge['returned'] or challenge['expires'] < time.monotonic()):
                 raise BridgeError('peer_mismatch', 'Mutual forwarding challenge failed')
+            await self._require_carrier(peer, candidate)
             self.verified[(peer, candidate['attempt_id'])] = time.monotonic() + 30
             for stage in ('ssh_authentication', 'forwarding', 'remote_bridge'):
                 self._stage(peer, stage, 'pass')
@@ -351,10 +401,12 @@ class ConnectionManager:
         if (not isinstance(nonce, str) or len(nonce) != 64 or not isinstance(p.get('generation'), int)
                 or not isinstance(p.get('issuer_boot'), str)):
             raise BridgeError('protocol_error', 'Malformed mutual challenge')
+        await self._require_carrier(peer, candidate)
         # Callback can use only the locally approved return lane, never a URL supplied by a peer.
         answer = await self._rpc(peer, 'callback', p, candidate)
         if answer.get('challenge') != nonce:
             raise BridgeError('protocol_error', 'Reverse forwarding callback failed')
+        await self._require_carrier(peer, candidate)
         self.verified[(peer, candidate['attempt_id'])] = time.monotonic() + 30
         if p['generation'] and answer.get('committed'):
             async with self._lock(peer):
@@ -364,10 +416,12 @@ class ConnectionManager:
                     decision['dispatch_ready'] = True; state['state'] = 'connected'; self._save(state)
         for stage in ('ssh_authentication', 'forwarding', 'remote_bridge'):
             self._stage(peer, stage, 'pass')
-        return {'peer_id': self.bridge.node_id, 'challenge': nonce, 'capability': CAPABILITY}
+        return {'peer_id': self.bridge.node_id, 'challenge': nonce, 'capability': CAPABILITY,
+                'ownership_proof': OWNER_CAPABILITY, 'version': VERSION}
 
     async def _receive_callback(self, peer, p):
         candidate = self._validate_candidate(peer, p.get('candidate'))
+        await self._require_carrier(peer, candidate)
         key = (peer, candidate['attempt_id'], p.get('generation'))
         challenge = self.challenges.get(key)
         if (not challenge or challenge['expires'] < time.monotonic() or challenge['returned']
@@ -389,16 +443,24 @@ class ConnectionManager:
         if not decision or decision.get('state') != 'committed':
             return False
         try:
+            if not await self._carrier_alive(peer, decision['candidate']): return False
             result = await self._rpc(peer, 'health', {'connection_id': decision['connection_id'],
                 'generation': decision['generation']}, decision['candidate'], timeout=1)
+            if not self._same_decision(peer, decision): return False
             if result.get('committed') and (not result.get('dispatch_ready') or not decision.get('dispatch_ready')):
                 await self._verify(peer, decision['candidate'], decision['generation'])
                 async with self._lock(peer):
                     state = self._state(peer)
-                    if state.get('decision', {}).get('connection_id') != decision['connection_id']:
+                    if not self._same_decision(peer, decision):
                         return False
                     state['decision']['dispatch_ready'] = True; state['state'] = 'connected'; self._save(state)
-            return result.get('committed') is True
+            alive = await self._carrier_alive(peer, decision['candidate'])
+            healthy = result.get('committed') is True and alive and self._same_decision(peer, decision)
+            if healthy:
+                # A restarted non-origin can retain the proven carrier, but
+                # still needs a finite idle clock. Polls never renew it.
+                self.last_activity.setdefault(peer, time.monotonic())
+            return healthy
         except (BridgeError, asyncio.TimeoutError, OSError):
             return False
 
@@ -408,11 +470,35 @@ class ConnectionManager:
                 or decision['connection_id'] != p.get('connection_id')
                 or decision['generation'] != p.get('generation')):
             raise BridgeError('stale_generation', 'Connection generation is not committed here')
+        # The caller separately proves the physical origin. If this endpoint
+        # is that origin, also check its handle while answering the health RPC.
+        if decision['candidate']['initiator'] == self.bridge.node_id:
+            await self._require_carrier(peer, decision['candidate'])
+        if not self._same_decision(peer, decision):
+            raise BridgeError('stale_generation', 'Selected connection changed during health verification')
         return {'committed': True, 'dispatch_ready': decision.get('dispatch_ready', False),
                 'peer_id': self.bridge.node_id, 'active': self._activity(peer)}
 
     async def _receive_decision(self, peer, p):
-        return {'decision': self._state(peer).get('decision'), 'stop_requested': self._state(peer)['stop_requested']}
+        return {'decision': self._state(peer).get('decision'), 'stop_requested': self._state(peer)['stop_requested'],
+                'version': VERSION, 'ownership_proof': OWNER_CAPABILITY}
+
+    async def _reconcile_commit(self, peer, decision):
+        # A surviving origin permits a restarted non-origin coordinator to
+        # finish its durable commit without first competing for occupied ports.
+        if (self._coordinator(peer) != self.bridge.node_id or not decision
+                or decision.get('state') != 'committed'
+                or not await self._carrier_alive(peer, decision['candidate'])):
+            return False
+        await self._verify(peer, decision['candidate'], decision['generation'])
+        await self._rpc(peer, 'commit', {'decision': decision}, decision['candidate'])
+        async with self._lock(peer):
+            if not self._same_decision(peer, decision):
+                raise BridgeError('decision_unresolved', 'Selected connection changed during commit recovery')
+            state = self._state(peer); state['decision']['dispatch_ready'] = True
+            state['state'] = 'connected'; self._save(state)
+        self.last_activity.setdefault(peer, time.monotonic())
+        return True
 
     async def _select(self, peer, candidate):
         if self._coordinator(peer) == self.bridge.node_id:
@@ -465,10 +551,10 @@ class ConnectionManager:
                 state = self._state(peer); state['decision']['state'] = 'closed'; self._save(state)
         if prior and prior.get('state') == 'committed':
             # Recover a lost commit ACK idempotently before considering replacement.
+            # Verify the *old physical owner* first. The fresh candidate can
+            # occupy the old port pair and answer HTTP for an otherwise dead ID.
             if not prior.get('dispatch_ready'):
-                await self._rpc(peer, 'commit', {'decision': prior}, candidate)
-                async with self._lock(peer):
-                    state = self._state(peer); state['decision']['dispatch_ready'] = True; self._save(state)
+                await self._reconcile_commit(peer, prior)
             if await self._healthy(peer, prior):
                 return self._state(peer)['decision']
         async with self._lock(peer):
@@ -508,7 +594,9 @@ class ConnectionManager:
                 raise BridgeError('connection_stopped', 'Owner stopped before commit acknowledgment')
             state['decision']['dispatch_ready'] = True; state['state'] = 'connected'
             state.pop('peer_paused', None); self._save(state)
-        self.last_activity.setdefault(peer, time.monotonic())
+        # A newly selected generation receives its own idle interval. Keeping
+        # the old generation's expired timer would immediately close it again.
+        self.last_activity[peer] = time.monotonic()
         await self._close_losers(peer, candidate['attempt_id'])
         return self._state(peer)['decision']
 
@@ -517,6 +605,7 @@ class ConnectionManager:
         if self._coordinator(peer) != peer:
             raise BridgeError('protocol_error', 'Prepare must come from the pairing coordinator')
         decision = self._validate_decision(peer, p.get('decision')); self._verified(peer, decision['candidate'])
+        await self._require_carrier(peer, decision['candidate'])
         prior = self._state(peer).get('decision')
         if prior and prior.get('state') == 'committed' and prior['generation'] != decision['generation']:
             if await self._healthy(peer, prior):
@@ -542,6 +631,7 @@ class ConnectionManager:
         if self._coordinator(peer) != peer:
             raise BridgeError('protocol_error', 'Commit must come from the pairing coordinator')
         proposed = self._validate_decision(peer, p.get('decision'))
+        await self._require_carrier(peer, proposed['candidate'])
         async with self._lock(peer):
             state = self._state(peer); existing = state.get('decision')
             if (state['stop_requested'] or not existing or existing['state'] not in ('prepared', 'committed')
@@ -551,7 +641,11 @@ class ConnectionManager:
             newly_committed = existing['state'] == 'prepared'
             existing.update(state='committed', dispatch_ready=True, committed_at=now())
             state['state'] = 'connected'; state.pop('peer_paused', None); self._save(state)
-        self.last_activity.setdefault(peer, time.monotonic())
+        if newly_committed:
+            self.last_activity[peer] = time.monotonic()
+        else:
+            # A duplicate commit or health reconciliation is not new activity.
+            self.last_activity.setdefault(peer, time.monotonic())
         # Defer loser closure until the commit response has travelled back.
         if newly_committed:
             self._defer_cleanup(peer, proposed['generation'], proposed['candidate']['attempt_id'])
@@ -588,6 +682,8 @@ class ConnectionManager:
                 raise BridgeError('connection_stopped', 'Owner stopped this peer; explicit local retry is required')
             if not decision or decision.get('state') != 'committed' or not decision.get('dispatch_ready'):
                 raise BridgeError('not_connected', 'Not connected; remote Bridge not checked.', True)
+            if decision['candidate']['initiator'] == self.bridge.node_id and not self._owned_alive(peer, decision['candidate']):
+                raise BridgeError('carrier_unavailable', 'The selected SSH child has exited', True)
             selected = {'url': self._url(peer, decision['candidate']), 'connection': {
                 'connection_id': decision['connection_id'], 'generation': decision['generation']}}
             self.inflight[peer] = self.inflight.get(peer, 0) + 1
@@ -617,6 +713,8 @@ class ConnectionManager:
                     or connection.get('generation') != decision['generation']):
                 raise BridgeError('stale_generation', 'Project request requires the current committed connection generation')
             self._validate_candidate(peer, decision['candidate'])
+            if decision['candidate']['initiator'] == self.bridge.node_id and not self._owned_alive(peer, decision['candidate']):
+                raise BridgeError('carrier_unavailable', 'The receiving origin no longer owns this SSH child', True)
             self.inflight[peer] = self.inflight.get(peer, 0) + 1
             if activity: self.last_activity[peer] = time.monotonic()
         acknowledged = False
@@ -680,11 +778,8 @@ class ConnectionManager:
             await asyncio.wait_for(draining.wait(), 30)
         settings = self._settings(peer); state = self._state(peer); decision = state.get('decision')
         if await self._healthy(peer, decision):
-            if not decision.get('dispatch_ready'):
-                # Restarted daemons may restore a committed route only after an authenticated mutual probe.
-                await self._verify(peer, decision['candidate'], decision['generation'])
-                async with self._lock(peer):
-                    state = self._state(peer); state['decision']['dispatch_ready'] = True; state['state'] = 'connected'; self._save(state)
+            # _healthy already reconciles a matching committed generation via
+            # mutual proof. Do not perform a second stale asynchronous write.
             return self.status(peer)
         if decision:
             async with self._lock(peer):
@@ -714,17 +809,30 @@ class ConnectionManager:
                 break
             episode['attempts'] += 1
             state = self._state(peer); state['episode'] = episode; self._save(state)  # Charge before any spawn.
-            candidate = self._candidate(peer)
-            self.local_candidates.setdefault(peer, set()).add(candidate['attempt_id'])
+            candidate = None
             try:
-                await asyncio.wait_for(self._open_candidate(peer, candidate), max(.01, deadline-time.monotonic()))
-                await asyncio.wait_for(self._select(peer, candidate), max(.01, deadline-time.monotonic()))
-                state = self._state(peer); state['episode']['state'] = 'healthy'; state['error'] = None; self._save(state)
+                prior = self._state(peer).get('decision')
+                reconciled = False
+                if (prior and prior.get('state') == 'committed' and not prior.get('dispatch_ready')
+                        and self._coordinator(peer) == self.bridge.node_id):
+                    candidate = prior['candidate']
+                    reconciled = await asyncio.wait_for(self._reconcile_commit(peer, prior), max(.01, deadline-time.monotonic()))
+                if not reconciled:
+                    candidate = self._candidate(peer)
+                    self.local_candidates.setdefault(peer, set()).add(candidate['attempt_id'])
+                    await asyncio.wait_for(self._open_candidate(peer, candidate), max(.01, deadline-time.monotonic()))
+                    await asyncio.wait_for(self._select(peer, candidate), max(.01, deadline-time.monotonic()))
+                async with self._lock(peer):
+                    state = self._state(peer)
+                    if (state.get('episode') or {}).get('request_id') != episode['request_id']:
+                        raise BridgeError('decision_unresolved', 'Recovery episode changed before finalization; its budget was not reset')
+                    state['episode']['state'] = 'healthy'; state['error'] = None; self._save(state)
                 self.healthy_since.setdefault(peer, time.monotonic())
                 await self._close_losers(peer, state['decision']['candidate']['attempt_id'])
                 return self.status(peer)
             except asyncio.CancelledError:
-                await self._close_owner(peer, candidate['attempt_id']); raise
+                if candidate: await self._close_owner(peer, candidate['attempt_id'])
+                raise
             except (BridgeError, OSError, asyncio.TimeoutError) as exc:
                 error = exc if isinstance(exc, BridgeError) else BridgeError('connection_timeout', 'Connection verification exceeded its bounded deadline', True)
                 if error.code == 'ssh_cleanup_unconfirmed':
@@ -732,7 +840,7 @@ class ConnectionManager:
                     # before selection. Retain only a candidate owning the
                     # durable prepared/committed decision, not an orphan lane.
                     selected = self._state(peer).get('decision') or {}
-                    if (selected.get('connection_id') != candidate['attempt_id'] or
+                    if candidate and (selected.get('connection_id') != candidate['attempt_id'] or
                             selected.get('state') not in ('prepared', 'committed')):
                         try:
                             await self._close_owner(peer, candidate['attempt_id'])
@@ -751,7 +859,7 @@ class ConnectionManager:
                          'forwarding' if error.code.startswith('forwarding') else 'remote_bridge')
                 self._stage(peer, stage, 'fail', error.code)
                 selected = self._state(peer).get('decision') or {}
-                if selected.get('connection_id') != candidate['attempt_id'] or selected.get('state') not in ('prepared', 'committed'):
+                if candidate and (selected.get('connection_id') != candidate['attempt_id'] or selected.get('state') not in ('prepared', 'committed')):
                     await self._close_owner(peer, candidate['attempt_id'])
                 if error.code in HARD_ERRORS:
                     break
@@ -884,12 +992,18 @@ class ConnectionManager:
                     'available': False, 'message': 'Not connected; remote Bridge not checked.'}
         state = self._state(peer_id); decision = state.get('decision')
         pending_cleanup = self._cleanup_pending(peer_id)
+        locally_alive = (not decision or decision.get('state') != 'committed'
+                         or decision['candidate'].get('initiator') == peer_id
+                         or (decision['candidate'].get('initiator') == self.bridge.node_id
+                             and self._owned_alive(peer_id, decision['candidate'])))
         mapping_current = not decision or decision['candidate']['map_digest'] == digest(
             self.bridge.config().get('connections', {}).get(peer_id, {}).get('lanes'))
         if pending_cleanup:
             message = 'Owned SSH child cleanup is unconfirmed; retry local disconnect before connecting again.'
         elif state['stop_requested']:
             message = 'Connection deliberately stopped; resume requires an explicit local retry.'
+        elif decision and decision.get('state') == 'committed' and not locally_alive:
+            message = 'The selected SSH origin no longer owns this live carrier; a new collaboration demand is required.'
         elif (state.get('error') or {}).get('code') == 'bridge_unavailable':
             message = 'SSH connected; remote Bridge unavailable at the configured port.'
         elif (state.get('error') or {}).get('code') in ('unauthorized', 'scope_denied'):
@@ -903,7 +1017,7 @@ class ConnectionManager:
         else:
             message = state.get('error', {}).get('message', 'Connection verification is incomplete.') if state.get('error') else 'Connection verification is incomplete.'
         return {**copy.deepcopy(state), 'message': message, 'available': bool(decision and
-            decision.get('state') == 'committed' and decision.get('dispatch_ready') and not state['stop_requested'] and mapping_current and not pending_cleanup),
+            decision.get('state') == 'committed' and decision.get('dispatch_ready') and not state['stop_requested'] and mapping_current and locally_alive and not pending_cleanup),
             'cleanup_pending': pending_cleanup,
             'remaining_seconds': round(max(0, self.deadlines.get(peer_id, 0)-time.monotonic()), 2),
             'active_operations': self.inflight.get(peer_id, 0)}
@@ -980,13 +1094,19 @@ class ConnectionManager:
     async def _receive_undrain(self, peer, p):
         if self._coordinator(peer) != peer:
             raise BridgeError('protocol_error', 'Only the selection coordinator can resume an idle drain')
+        prior = self._state(peer).get('decision') or {}
+        if (prior.get('generation') != p.get('generation') or prior.get('connection_id') != p.get('connection_id')
+                or prior.get('state') not in ('committed', 'draining')):
+            raise BridgeError('decision_unresolved', 'No matching selected idle drain can be resumed')
+        alive = await self._carrier_alive(peer, prior['candidate'])
         async with self._lock(peer):
             state = self._state(peer); decision = state.get('decision') or {}
             if (decision.get('generation') != p.get('generation') or decision.get('connection_id') != p.get('connection_id')
                     or decision.get('state') not in ('committed', 'draining')):
                 raise BridgeError('decision_unresolved', 'No matching selected idle drain can be resumed')
-            decision.update(state='committed', dispatch_ready=True); state['state'] = 'connected'; self._save(state)
-        return {'committed': True}
+            decision.update(state='committed', dispatch_ready=alive)
+            state['state'] = 'connected' if alive else 'disconnected'; self._save(state)
+        return {'committed': True, 'dispatch_ready': alive}
 
     async def _receive_close(self, peer, p):
         async with self._lock(peer):
@@ -1019,9 +1139,11 @@ class ConnectionManager:
             control = {'generation': decision['generation'], 'connection_id': decision['connection_id']}
             result = await self._rpc(peer, 'drain', control, decision['candidate'])
             if not result.get('draining'):
+                alive = await self._carrier_alive(peer, decision['candidate'])
                 async with self._lock(peer):
-                    state = self._state(peer); state['decision'].update(state='committed', dispatch_ready=True)
-                    state['state'] = 'connected'; self._save(state)
+                    if not self._same_decision(peer, decision, ('committed', 'draining')): return
+                    state = self._state(peer); state['decision'].update(state='committed', dispatch_ready=alive)
+                    state['state'] = 'connected' if alive else 'disconnected'; self._save(state)
                 return
             async with self._lock(peer):
                 current = self._state(peer).get('decision') or {}
@@ -1038,13 +1160,16 @@ class ConnectionManager:
             if isinstance(exc, BridgeError) and exc.code == 'connection_busy':
                 try:
                     await self._rpc(peer, 'undrain', control, decision['candidate'])
+                    alive = await self._carrier_alive(peer, decision['candidate'])
                     async with self._lock(peer):
-                        state = self._state(peer); state['decision'].update(state='committed', dispatch_ready=True)
-                        state['state'] = 'connected'; self._save(state)
+                        if not self._same_decision(peer, decision, ('committed', 'draining')): return
+                        state = self._state(peer); state['decision'].update(state='committed', dispatch_ready=alive)
+                        state['state'] = 'connected' if alive else 'disconnected'; self._save(state)
                     return
                 except (BridgeError, OSError, asyncio.TimeoutError): pass
             # Uncertain drain must fence new work, never silently revive half a connection.
-            state = self._state(peer); state['state'] = 'suspended'; self._save(state)
+            if self._same_decision(peer, decision, ('committed', 'draining')):
+                state = self._state(peer); state['state'] = 'suspended'; self._save(state)
 
     async def maintenance(self):
         """Never dial on ordinary startup or because only queued work exists."""
@@ -1076,13 +1201,21 @@ class ConnectionManager:
             if self._cleanup_pending(peer): continue
             state = self._state(peer); decision = state.get('decision')
             if state['stop_requested'] or state.get('peer_paused'): continue
+            # Selection/finalization owns its durable episode until the demand
+            # task finishes. Heartbeats must not clear it or idle-close its lane.
+            if self._demand_active(peer): continue
             if not decision or decision.get('state') != 'committed' or not decision.get('dispatch_ready'): continue
             if time.monotonic() - self.last_probe.get(peer, 0) < 5: continue
             self.last_probe[peer] = time.monotonic()
-            if await self._healthy(peer, decision):
+            healthy = await self._healthy(peer, decision)
+            # A demand may have started, or a newer selection committed, during
+            # the awaited proof. Never fence/refill the replacement's state.
+            if self._demand_active(peer) or not self._same_decision(peer, decision): continue
+            if healthy:
                 if self._activity(peer): self.last_activity[peer] = time.monotonic()
                 elif not self._persistent(peer) and time.monotonic()-self.last_activity.get(peer, time.monotonic()) >= self._settings(peer).get('idle_seconds', 900):
                     await self._idle_close(peer, decision)
+                if self._demand_active(peer) or not self._same_decision(peer, decision): continue
                 health_began = self.healthy_since.get(peer, time.monotonic())
                 healthy_with_progress = (time.monotonic()-health_began >= 300
                                          and peer in self.last_progress

@@ -46,7 +46,7 @@ After `transport-config` has recorded each owner's outbound SSH identity/receive
 
 On A run `connection-config --peer computer-b --lanes-file /path/to/lanes.json`; on B run `connection-config --peer computer-a --lanes-file /path/to/lanes.json`. Use the appropriate installed Windows/Linux launcher. This validates/saves local connection settings only; it does not authorize SSH, open a firewall, change network policy, or dial. Both endpoints must configure the same map before `connect`. The enclosing `connections` entry is keyed by the other peer, while the lane map is keyed first by initiator and then by endpoint.
 
-Legacy fixed forwarding remains separate. An older peer without `on_demand_tunnel_v1` cannot participate in managed dual initiation. Keep its existing connection intact until both peers are upgraded and a new map is verified. The prerelease's new selection/lifetime behavior remains experimental until its exact Windows/Linux candidates complete the real-pair acceptance tests listed in [TESTING.md](TESTING.md).
+Legacy fixed forwarding remains separate. Managed dual initiation requires both `on_demand_tunnel_v1` and `retained_ssh_owner_v1` on both endpoints. The latter is new in rc.7: upgrade both computers before resuming managed connections. Keep the existing transport intact during a coordinated upgrade and verify both daemon versions and capabilities before reconnecting. An rc.6/rc.7 mixed pair has not passed managed compatibility. The prerelease's new selection/lifetime behavior remains experimental until its exact Windows/Linux candidates complete the real-pair acceptance tests listed in [TESTING.md](TESTING.md).
 
 ## One committed tunnel
 
@@ -54,7 +54,7 @@ An existing healthy, mutually authenticated connection wins. Otherwise either en
 
 SSH authentication, both forwards, paired Bridge challenge/response, and a durable matching selection decision are required before dispatch. Proposed, prepared, committed, draining, and closed states distinguish progress. Generation checks reject delayed operations on superseded connections. Only the losing candidate's owner closes its own verified SSH process after the winner is confirmed.
 
-Lost acknowledgments are reconciled against durable state. A timer, stale PID, existing listener, or persisted connection record cannot prove health. If agreement is uncertain, new dispatch pauses rather than electing competing routes. Existing accepted execution may finish and save its result.
+Lost acknowledgments are reconciled against durable state. The originating daemon must also attest that it still retains the exact live SSH child handle. A replacement tunnel answering at the same port cannot revive the former tunnel's generation. A timer, stale PID, existing listener, or persisted connection record cannot prove health. If agreement is uncertain, new dispatch pauses rather than electing competing routes. Existing accepted execution may finish and save its result.
 
 ## Bounded attempts and lifetime
 
