@@ -14,7 +14,7 @@ import uuid
 
 from codex_bridge import autostart, cli, processes, transport
 from codex_bridge.connections import ConnectionManager
-from codex_bridge.core import BridgeError, Store
+from codex_bridge.core import Bridge, BridgeError, Store
 
 
 class Child:
@@ -277,15 +277,77 @@ class ManagerCloseTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.ensure('bravo', str(uuid.uuid4()), retry=True)
         self.assertEqual(caught.exception.code, 'access_revoked')
 
-    async def test_revoked_local_cleanup_still_refuses_active_work(self):
+    async def test_authorized_local_cleanup_still_refuses_active_work(self):
         attempt, owner, _ = self.add(Owner(fails=False))
-        self.cfg['peers']['bravo']['enabled'] = False
         self.bridge.connection_activity = lambda peer: True
         with self.assertRaises(BridgeError) as caught:
             await self.manager.disconnect('bravo', str(uuid.uuid4()))
         self.assertEqual(caught.exception.code, 'connection_busy')
         self.assertEqual(owner.calls, 0)
         self.assertFalse(self.store.get('connection_children', attempt)['closed'])
+
+    async def test_revoked_pending_abort_cleanup_retries_same_id_without_touching_work(self):
+        attempt, owner, _ = self.add()
+        request = str(uuid.uuid4())
+        self.cfg['peers']['bravo']['enabled'] = False
+        self.bridge.connection_activity = lambda peer: Bridge.connection_activity(self.bridge, peer)
+        journals = {
+            ('artifact_requests', 'pending-abort'): {'request_id': 'pending-abort', 'peer_id': 'bravo',
+                'transfer_id': 'retained-transfer', 'status': 'aborted', 'remote_abort_pending': True},
+            ('incoming', 'active-task'): {'request_id': 'active-task', 'peer_id': 'bravo', 'status': 'running'},
+            ('outgoing', 'pending-result'): {'request_id': 'pending-result', 'peer_id': 'bravo',
+                'status': 'completed', 'result_ack_pending': True, 'result': {'text': 'retained result'}},
+            ('pending_messages', 'pending-message'): {'peer_id': 'bravo', 'status': 'pending', 'text': 'retained message'},
+        }
+        artifact_key = ('artifact_requests', 'pending-abort')
+        self.store.put(*artifact_key, journals[artifact_key])
+        self.assertTrue(self.bridge.connection_activity('bravo'), 'Pending abort alone must remain durable work')
+        for (kind, key), value in journals.items():
+            self.store.put(kind, key, value)
+        other_attempt, other_owner = str(uuid.uuid4()), Owner(fails=False)
+        self.manager.owners[('charlie', other_attempt)] = (other_owner, Errors())
+        self.manager.local_candidates['charlie'] = {other_attempt}
+        self.store.put('connection_children', other_attempt,
+            {'peer_id': 'charlie', 'attempt_id': other_attempt, 'closed': False})
+        state = self.manager._state('bravo')
+        state['decision'] = {'state': 'committed', 'dispatch_ready': True, 'connection_id': attempt,
+                             'generation': 1, 'candidate': {'map_digest': 'fixture'}}
+        self.manager._save(state)
+        config_before = json.dumps(self.cfg, sort_keys=True)
+        with patch.object(self.manager, '_rpc', side_effect=AssertionError('No revoked remote RPC')) as rpc, \
+                patch.object(self.manager, '_open_candidate', side_effect=AssertionError('No cleanup dialing')) as dial:
+            with self.assertRaises(BridgeError) as caught:
+                await self.manager.disconnect('bravo', request)
+            self.assertEqual(caught.exception.code, 'ssh_cleanup_unconfirmed')
+            self.assertIsNone(self.store.get('connection_disconnects', 'bravo:' + request))
+            self.assertIs(self.manager.owners[('bravo', attempt)][0], owner)
+            self.assertEqual(owner.calls, 1)
+            self.assertFalse(self.store.get('connection_children', attempt)['closed'])
+            await self.manager.maintenance()
+            self.assertEqual(owner.calls, 1, 'Maintenance must not loop a failed close')
+            owner.fails = False
+            result = await self.manager.disconnect('bravo', request)
+            self.assertTrue(result['local_only'])
+            self.assertFalse(result['remote_closure_confirmed'])
+            self.assertEqual(result['request_id'], request)
+            self.assertEqual(owner.calls, 2)
+            self.assertTrue(self.store.get('connection_children', attempt)['closed'])
+            self.assertEqual(self.manager.status('bravo')['cleanup_pending'], [])
+            self.assertEqual(await self.manager.disconnect('bravo', request), result)
+            self.assertEqual(owner.calls, 2)
+            with self.assertRaises(BridgeError) as caught:
+                await self.manager.ensure('bravo', str(uuid.uuid4()), retry=True)
+            self.assertEqual(caught.exception.code, 'access_revoked')
+            rpc.assert_not_called()
+            dial.assert_not_called()
+        self.assertEqual(json.dumps(self.cfg, sort_keys=True), config_before)
+        self.assertEqual(self.manager.status('bravo')['state'], 'revoked')
+        self.assertTrue(self.manager.status('bravo')['stop_requested'])
+        self.assertTrue(self.bridge.connection_activity('bravo'))
+        for (kind, key), value in journals.items():
+            self.assertEqual(self.store.get(kind, key), value, 'Cleanup must not rewrite work journals')
+        self.assertEqual(other_owner.calls, 0)
+        self.assertFalse(self.store.get('connection_children', other_attempt)['closed'])
 
     async def test_selected_winner_is_preserved_when_demand_cannot_close_duplicate(self):
         failed, loser, _ = self.add()

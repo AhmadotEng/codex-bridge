@@ -297,6 +297,229 @@ class ChunkedArtifactTests(unittest.IsolatedAsyncioTestCase):
         await self.rpc('beta', 'peer_revoke', {'peer_id': 'alpha'})
         self.assertEqual(self.bridges['beta'].store.get('artifact_transfers', reply['transfer_id'])['status'], 'aborted')
 
+    async def test_failed_abort_retry_acknowledges_same_transfer_without_resuming(self):
+        await self.create()
+        self.export('alpha')
+        sender, receiver = self.bridges['alpha'], self.bridges['beta']
+        original = sender.remote
+        aborts = []
+        async def unreliable(peer_id, method, params):
+            if method == 'peer.artifact_chunk':
+                raise BridgeError('peer_unavailable', 'Injected transfer interruption', True)
+            if method == 'peer.artifact_abort':
+                aborts.append(dict(params))
+                if len(aborts) <= 2:
+                    raise BridgeError('peer_unavailable', 'Injected abort delivery failure', True)
+            return await original(peer_id, method, params)
+        sender.remote = unreliable
+        args = self.send_args('abort-retry')
+        await self.rpc('alpha', 'artifact_send', args)
+        paused = await self.finished('alpha', args['request_id'])
+        self.assertEqual(paused['status'], 'paused')
+        for count in (1, 2):
+            failed = await self.rpc('alpha', 'artifact_transfer_cancel', args)
+            self.assertEqual(failed['status'], 'aborted')
+            self.assertTrue(failed['remote_abort_pending'])
+            self.assertEqual(len(aborts), count, 'Only explicit cancellation may retry')
+            self.assertEqual(receiver.store.get('artifact_transfers', paused['transfer_id'])['status'], 'receiving')
+        final = await self.rpc('alpha', 'artifact_transfer_cancel', args)
+        self.assertEqual(final['status'], 'aborted')
+        self.assertFalse(final.get('remote_abort_pending', False))
+        self.assertNotIn('error', final)
+        self.assertEqual(aborts, [{'session_id': args['session_id'], 'transfer_id': paused['transfer_id']}] * 3)
+        self.assertEqual(len(receiver.store.all('artifact_transfers')), 1)
+        self.assertEqual(receiver.store.get('artifact_transfers', paused['transfer_id'])['status'], 'aborted')
+        self.assertFalse(sender.connection_activity('beta'))
+        with self.assertRaises(BridgeError) as caught:
+            await self.rpc('alpha', 'artifact_send', args)
+        self.assertEqual(caught.exception.code, 'transfer_closed')
+        self.assertIsNone(sender.store.get('mutations', args['request_id']))
+        self.assertFalse((Path(self.configs['beta']['projects']['first']['import_root']) / 'received.bin').exists())
+
+    async def test_abort_retry_preserves_completed_commit_and_request_deduplication(self):
+        await self.create()
+        data = self.export('alpha')
+        sender, receiver = self.bridges['alpha'], self.bridges['beta']
+        original = sender.remote
+        commits, aborts = [], []
+        async def unreliable(peer_id, method, params):
+            if method == 'peer.artifact_abort':
+                aborts.append(dict(params))
+                if len(aborts) == 1:
+                    raise BridgeError('peer_unavailable', 'Injected abort delivery failure', True)
+            result = await original(peer_id, method, params)
+            if method == 'peer.artifact_commit':
+                commits.append(dict(params))
+                raise BridgeError('peer_unavailable', 'Injected lost commit receipt', True)
+            return result
+        sender.remote = unreliable
+        args = self.send_args('committed-abort-retry')
+        await self.rpc('alpha', 'artifact_send', args)
+        paused = await self.finished('alpha', args['request_id'])
+        self.assertEqual(paused['status'], 'paused')
+        committed = receiver.store.get('artifact_transfers', paused['transfer_id'])['result']
+        target = Path(self.configs['beta']['projects']['first']['import_root']) / 'received.bin'
+        first_mtime = target.stat().st_mtime_ns
+        failed = await self.rpc('alpha', 'artifact_transfer_cancel', args)
+        self.assertTrue(failed['remote_abort_pending'])
+        final = await self.rpc('alpha', 'artifact_transfer_cancel', args)
+        self.assertEqual(final['status'], 'completed')
+        self.assertFalse(final.get('remote_abort_pending', False))
+        self.assertNotIn('error', final)
+        self.assertEqual(final['result'], committed)
+        self.assertEqual(await self.rpc('alpha', 'artifact_send', args), committed)
+        self.assertEqual((await self.rpc('alpha', 'artifact_transfer_cancel', args))['result'], committed)
+        self.assertEqual(len(commits), 1)
+        self.assertEqual(aborts, [{'session_id': args['session_id'], 'transfer_id': paused['transfer_id']}] * 2)
+        self.assertEqual(target.read_bytes(), data)
+        self.assertEqual(target.stat().st_mtime_ns, first_mtime)
+        self.assertEqual(len(receiver.store.all('artifacts')), 1)
+        self.assertEqual(sender.store.get('mutations', args['request_id'])['result'], committed)
+        self.assertFalse(sender.connection_activity('beta'))
+
+    async def test_explicit_cancel_reconciles_historical_completed_pending_flag(self):
+        await self.create()
+        self.export('alpha')
+        args = self.send_args('historical-pending-abort')
+        await self.rpc('alpha', 'artifact_send', args)
+        completed = await self.finished('alpha', args['request_id'])
+        sender = self.bridges['alpha']
+        value = sender.store.get('artifact_requests', args['request_id'])
+        value.update(remote_abort_pending=True, error={'code': 'peer_unavailable'})
+        sender.store.put('artifact_requests', args['request_id'], value)
+        original = sender.remote
+        calls = []
+        async def observe(peer_id, method, params):
+            calls.append((method, dict(params)))
+            return await original(peer_id, method, params)
+        sender.remote = observe
+        final = await self.rpc('alpha', 'artifact_transfer_cancel', args)
+        self.assertEqual(final['status'], 'completed')
+        self.assertFalse(final.get('remote_abort_pending', False))
+        self.assertNotIn('error', final)
+        self.assertEqual(final['result'], completed['result'])
+        self.assertEqual(calls, [('peer.artifact_abort', {'session_id': args['session_id'], 'transfer_id': completed['transfer_id']})])
+        self.assertEqual(await self.rpc('alpha', 'artifact_send', args), completed['result'])
+        self.assertEqual(len(calls), 1)
+
+    async def test_terminal_pending_abort_keeps_only_its_peer_active(self):
+        bridge = self.bridges['alpha']
+        for kind in ('artifact_requests', 'artifact_transfers'):
+            for status in ('aborted', 'failed', 'cancelled', 'expired', 'completed'):
+                with self.subTest(kind=kind, status=status):
+                    value = {'status': status, 'remote_abort_pending': True,
+                             'peer_id': 'beta'} if kind == 'artifact_requests' else {
+                                 'status': status, 'remote_abort_pending': True, 'actor': 'beta'}
+                    bridge.store.put(kind, 'pending-abort', value)
+                    self.assertTrue(bridge.connection_activity('beta'))
+                    self.assertFalse(bridge.connection_activity('another-peer'))
+                    value['remote_abort_pending'] = False
+                    bridge.store.put(kind, 'pending-abort', value)
+                    self.assertFalse(bridge.connection_activity('beta'))
+
+    async def test_unacknowledged_abort_reply_never_clears_pending_intent(self):
+        await self.create()
+        sender = self.bridges['alpha']
+        args = {'session_id': 'session-first', 'request_id': 'invalid-abort-reply'}
+        sender.store.put('artifact_requests', args['request_id'], {**args, 'direction': 'send',
+            'peer_id': 'beta', 'transfer_id': 'unacknowledged-transfer', 'status': 'paused', 'digest': 'unchanged'})
+        replies = [None, {'status': 'receiving'}, {'status': 'completed'}]
+        for reply in replies:
+            calls = []
+            async def invalid(peer_id, method, params):
+                calls.append((peer_id, method, params))
+                return reply
+            sender.remote = invalid
+            result = await sender.artifact_transfers.cancel(args)
+            self.assertTrue(result['remote_abort_pending'])
+            self.assertEqual(result['status'], 'aborted')
+            self.assertEqual(result['error']['code'], 'invalid_response')
+            self.assertTrue(sender.connection_activity('beta'))
+            self.assertEqual(len(calls), 1)
+            self.assertIsNone(sender.store.get('mutations', args['request_id']))
+
+    async def test_concurrent_cancel_cannot_regress_completed_acknowledgment(self):
+        await self.create()
+        self.export('alpha')
+        sender = self.bridges['alpha']
+        original = sender.remote
+        entered, release = asyncio.Event(), asyncio.Event()
+        aborts = []
+        async def unreliable(peer_id, method, params):
+            if method == 'peer.artifact_abort':
+                aborts.append(dict(params))
+                if len(aborts) == 1:
+                    entered.set()
+                    await release.wait()
+                    raise BridgeError('peer_unavailable', 'Injected delayed abort failure', True)
+            result = await original(peer_id, method, params)
+            if method == 'peer.artifact_commit':
+                raise BridgeError('peer_unavailable', 'Injected lost commit receipt', True)
+            return result
+        sender.remote = unreliable
+        args = self.send_args('concurrent-abort')
+        await self.rpc('alpha', 'artifact_send', args)
+        self.assertEqual((await self.finished('alpha', args['request_id']))['status'], 'paused')
+        first = asyncio.create_task(sender.artifact_transfers.cancel(args))
+        await asyncio.wait_for(entered.wait(), 5)
+        second = asyncio.create_task(sender.artifact_transfers.cancel(args))
+        try:
+            await asyncio.sleep(.01)
+            self.assertEqual(len(aborts), 1, 'Same-request abort attempts must be serialized')
+            self.assertTrue(sender.connection_activity('beta'))
+        finally:
+            release.set()
+            outcomes = await asyncio.gather(first, second)
+        self.assertTrue(outcomes[0]['remote_abort_pending'])
+        self.assertEqual(outcomes[1]['status'], 'completed')
+        final = await sender.artifact_transfers.status(args)
+        self.assertEqual(final['status'], 'completed')
+        self.assertFalse(final.get('remote_abort_pending', False))
+        self.assertNotIn('error', final)
+        self.assertEqual(await self.rpc('alpha', 'artifact_send', args), final['result'])
+        self.assertEqual(len(aborts), 2)
+        self.assertEqual(aborts[0], aborts[1])
+
+    async def test_cancel_during_send_begin_preserves_failed_remote_abort_for_retry(self):
+        await self.create()
+        self.export('alpha')
+        sender = self.bridges['alpha']
+        original = sender.remote
+        entered, release = asyncio.Event(), asyncio.Event()
+        aborts = []
+        async def unreliable(peer_id, method, params):
+            if method == 'peer.artifact_abort':
+                aborts.append(dict(params))
+                if len(aborts) == 1:
+                    raise BridgeError('peer_unavailable', 'Injected begin-race abort failure', True)
+            result = await original(peer_id, method, params)
+            if method == 'peer.artifact_begin':
+                entered.set()
+                await release.wait()
+            return result
+        sender.remote = unreliable
+        args = self.send_args('begin-race-abort')
+        await self.rpc('alpha', 'artifact_send', args)
+        await asyncio.wait_for(entered.wait(), 5)
+        try:
+            cancelled = await self.rpc('alpha', 'artifact_transfer_cancel', args)
+            self.assertEqual(cancelled['status'], 'aborted')
+            self.assertNotIn('transfer_id', cancelled)
+        finally:
+            release.set()
+            await asyncio.gather(*list(sender.artifact_transfers.running.values()))
+        pending = await sender.artifact_transfers.status(args)
+        self.assertTrue(pending['remote_abort_pending'])
+        self.assertEqual(len(aborts), 1)
+        self.assertTrue(sender.connection_activity('beta'))
+        final = await self.rpc('alpha', 'artifact_transfer_cancel', args)
+        self.assertEqual(final['status'], 'aborted')
+        self.assertFalse(final.get('remote_abort_pending', False))
+        self.assertEqual(aborts, [{'session_id': args['session_id'], 'transfer_id': pending['transfer_id']}] * 2)
+        self.assertEqual(len(self.bridges['beta'].store.all('artifact_transfers')), 1)
+        self.assertFalse(sender.connection_activity('beta'))
+        self.assertFalse((Path(self.configs['beta']['projects']['first']['import_root']) / 'received.bin').exists())
+
     async def test_symlink_import_root_is_denied(self):
         await self.create()
         parent = self.root / 'outside'

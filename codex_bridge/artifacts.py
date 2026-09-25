@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import time
 import uuid
+import weakref
 
 from .core import BridgeError, canonical, digest, identifier, now, safe_path
 
@@ -62,6 +63,7 @@ class ArtifactTransfers:
         self.staging = safe_path(bridge.state_dir, 'artifact-staging')
         self.staging.mkdir(exist_ok=True)
         self.running = {}
+        self.cancel_locks = weakref.WeakValueDictionary()
         self.receive_lock = asyncio.Lock()
         self.archive_lock = asyncio.Lock()
         for item in bridge.store.all('artifact_requests'):
@@ -560,9 +562,14 @@ class ArtifactTransfers:
             self.record('artifact_requests', p['request_id'], request)
         offer = {k: request[k] for k in ('session_id', 'request_id', 'artifact_id', 'destination', 'size', 'sha256')}
         reply = await self.bridge.remote(session['peer_id'], 'peer.artifact_begin', offer)
-        if self.bridge.store.get('artifact_requests', p['request_id'])['status'] == 'aborted':
-            await self.bridge.remote(session['peer_id'], 'peer.artifact_abort', {
-                'session_id': session['session_id'], 'transfer_id': reply['transfer_id']})
+        current = self.bridge.store.get('artifact_requests', p['request_id'])
+        if current['status'] == 'aborted':
+            # A cancellation while begin was in flight had no remote ID yet.
+            # Retain it before the existing abort attempt so an explicit retry
+            # can reconcile a lost reply without creating another transfer.
+            current['transfer_id'] = reply['transfer_id']
+            self.record('artifact_requests', p['request_id'], current)
+            return (await self.cancel(p)).get('result')
         self.check_active(p['request_id'])
         request['transfer_id'] = reply['transfer_id']
         self.record('artifact_requests', p['request_id'], request)
@@ -640,25 +647,46 @@ class ArtifactTransfers:
                 'remote_abort_pending') if k in value}
 
     async def cancel(self, p):
+        await self.status(p)
+        # Retain a local reference across the await; weak entries disappear
+        # after all callers finish, without leaking one lock per past request.
+        lock = self.cancel_locks.setdefault(p['request_id'], asyncio.Lock())
+        async with lock:
+            return await self._cancel(p)
+
+    async def _cancel(self, p):
         session = self.bridge.session(p['session_id'], operation='artifacts')
         await self.status(p)
         value = self.bridge.store.get('artifact_requests', p['request_id'])
-        if value['status'] == 'completed':
+        if value['status'] == 'completed' and not value.get('remote_abort_pending'):
             return await self.status(p)
-        value['status'] = 'aborted'
+        if value['status'] != 'completed':
+            value['status'] = 'aborted'
         self.record('artifact_requests', p['request_id'], value)
         if value.get('transfer_id'):
             args = {'session_id': p['session_id'], 'transfer_id': value['transfer_id']}
             if value['direction'] == 'send':
+                value['remote_abort_pending'] = True
+                self.record('artifact_requests', p['request_id'], value)
                 try:
                     reply = await self.bridge.remote(session['peer_id'], 'peer.artifact_abort', args)
+                    if not isinstance(reply, dict) or reply.get('status') not in ('aborted', 'completed') or (
+                            reply['status'] == 'completed' and not isinstance(reply.get('result'), dict)):
+                        raise BridgeError('invalid_response', 'Peer did not acknowledge artifact cancellation', True)
+                    value = self.bridge.store.get('artifact_requests', p['request_id'])
                     if reply['status'] == 'completed':
                         value.update(status='completed', result=reply['result'])
                         self.bridge.store.put('mutations', p['request_id'], {'digest': value['digest'], 'result': reply['result']})
-                        self.record('artifact_requests', p['request_id'], value)
-                except BridgeError as exc:
-                    value.update(remote_abort_pending=True, error=exc.as_dict())
+                    value.pop('remote_abort_pending', None)
+                    value.pop('error', None)
                     self.record('artifact_requests', p['request_id'], value)
+                except BridgeError as exc:
+                    # A concurrently finishing send may already have its
+                    # commit receipt; a late abort failure cannot undo it.
+                    value = self.bridge.store.get('artifact_requests', p['request_id'])
+                    if value.get('remote_abort_pending'):
+                        value['error'] = exc.as_dict()
+                        self.record('artifact_requests', p['request_id'], value)
             else:
                 async with self.receive_lock:
                     self.abort(session, args, self.bridge.node_id)

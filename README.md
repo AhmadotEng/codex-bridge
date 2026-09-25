@@ -17,16 +17,16 @@ Let two people's Codex installations exchange project tasks, replies, and select
 
 For an existing installation, finish active work and follow the [upgrade and rollback instructions](docs/ADVANCED.md). Preserve private configuration and saved state when replacing the code.
 
-Use local Python 3.11+, a complete Codex installation signed into your own account, and OpenSSH. Download and extract the matching installer from the [0.3.2-rc.5 prerelease](https://github.com/AhmadotEng/codex-bridge/releases/tag/v0.3.2-rc.5). Compare its SHA-256 with that release's `SHA256SUMS`.
+Use local Python 3.11+, a complete Codex installation signed into your own account, and OpenSSH. Download and extract the matching installer from the [0.3.2-rc.6 prerelease](https://github.com/AhmadotEng/codex-bridge/releases/tag/v0.3.2-rc.6). Compare its SHA-256 with that release's `SHA256SUMS`.
 
 | Download | Run inside the extracted `codex-bridge` folder |
 | --- | --- |
-| [Windows ZIP](https://github.com/AhmadotEng/codex-bridge/releases/download/v0.3.2-rc.5/codex-bridge-0.3.2-rc.5-windows.zip) | PowerShell: `.\scripts\setup.ps1` |
-| [Linux tar.gz](https://github.com/AhmadotEng/codex-bridge/releases/download/v0.3.2-rc.5/codex-bridge-0.3.2-rc.5-linux.tar.gz) | Terminal: `sh scripts/setup.sh` |
+| [Windows ZIP](https://github.com/AhmadotEng/codex-bridge/releases/download/v0.3.2-rc.6/codex-bridge-0.3.2-rc.6-windows.zip) | PowerShell: `.\scripts\setup.ps1` |
+| [Linux tar.gz](https://github.com/AhmadotEng/codex-bridge/releases/download/v0.3.2-rc.6/codex-bridge-0.3.2-rc.6-linux.tar.gz) | Terminal: `sh scripts/setup.sh` |
 
 Both contain the same Bridge source and guides. Setup creates this computer's private configuration and registers its MCP tools. It does not copy accounts, install SSH services, or alter unrelated routes. The default location is `~/plugins/codex-bridge`; existing settings are preserved and conflicts are reported.
 
-**Experimental prerelease:** previous rc.4 upgrades preserved saved work and the working SSH route. Native tasks, file transfer, retained context and request deduplication passed over that route. rc.5 adds a tested SSH cleanup correction; its deployment acceptance, managed connections initiated from either computer, simultaneous initiation, and actual sign-in/reboot acceptance remain pending. See the [test evidence](docs/TESTING.md).
+**Experimental prerelease:** previous rc.4 upgrades preserved saved work and the working SSH route. Native tasks, file transfer, retained context and request deduplication passed over that route. rc.6 includes SSH cleanup and artifact-cancellation corrections. Candidate deployment, managed connections initiated from either computer, simultaneous initiation, and actual sign-in/reboot acceptance remain separate checks. See the [test evidence](docs/TESTING.md).
 
 Follow the **[two-computer setup guide](docs/SETUP.md)** to exchange invitations, authorize SSH in both directions, and choose project folders. Select the same project ID on both computers. Waiting startup is optional; persistent connections are off by default.
 

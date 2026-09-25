@@ -926,7 +926,10 @@ class ConnectionManager:
         if old: return old
         async with self._lock(peer):
             state = self._state(peer); decision = copy.deepcopy(state.get('decision'))
-            if self._activity(peer):
+            # Revocation already forbids this route, including for pending work.
+            # Match maintenance: close only retained local children, preserving
+            # all task/transfer/result journals for owner reconciliation.
+            if not revoked and self._activity(peer):
                 raise BridgeError('connection_busy', 'Active tasks, transfers, or pending results must finish or be cancelled before disconnect', True)
             confirmed = False
             if decision and not revoked:

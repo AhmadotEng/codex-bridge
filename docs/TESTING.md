@@ -1,5 +1,22 @@
 # Verification
 
+## 0.3.2-rc.6 candidate: cancellation acknowledgments
+
+The rc.6 candidate retains pending artifact-abort acknowledgments as active work. An explicit cancellation retry uses the original transfer ID and clears its pending state only after a valid terminal acknowledgment. Concurrent cancellation replies cannot overwrite a completed result, and cancellation during transfer creation retains the returned transfer ID for reconciliation. This adds no automatic artifact retry or dialing policy. After revocation, local cleanup of retained SSH children remains possible without altering pending work or restoring remote access.
+
+All 101 targeted artifact, core, connection-manager and owned-child cleanup checks passed without skips. Independent review accepted the fixes after reproducing the prior failure cases. Full candidate and deployment results are recorded separately when completed.
+
+Full Windows/Python 3.11 candidate verification passed **417 tests: 409 passed and eight platform skips**, in 137.649 seconds. Plugin manifest validation passed. Linux candidate, packaged installation and live promotion results remain pending at this source revision.
+
+Additional September 25 checks on the existing deployments passed:
+
+| Check | Observed result |
+| --- | --- |
+| Windows initiates to Linux | Pinned-host/public-key authentication and both allowed forwarding directions passed authenticated Bridge identity checks. The exact temporary SSH child exited and both temporary listeners were verified absent. Existing configuration, source, startup and legacy carrier were preserved. |
+| Linux owner-service preparation | All 20 native promotion-helper fixtures passed. An isolated rc.5 service completed registration, start, authenticated status, repeated-start reuse, 121.267 seconds of waiting, stop and removal. Seven samples observed no SSH process in its service cgroup and no connection journal records. Sampling cannot exclude a transient process between observations. |
+
+These checks do not establish managed selection, simultaneous initiation or actual sign-in/reboot. Both live deployments still run rc.4 while the next candidate is prepared. The Linux real owner-login unit remains enabled but inactive beside its preserved manual daemon; only the isolated test unit was started and removed.
+
 ## 0.3.2-rc.5 cleanup correction and receiver evidence
 
 rc.5 keeps exact SSH process ownership until exit and cleanup journaling succeed. An unconfirmed close reports `ssh_cleanup_unconfirmed`, retains its child for an explicit local disconnect retry, and blocks competing dialing. Caller cancellation does not abandon cleanup. A failed duplicate close preserves the selected route, while rejected unselected candidates are cleaned up. Revocation cannot authorize a remote call or prevent local cleanup of the retained owned process. A restarted daemon does not adopt a saved PID as a new process handle.

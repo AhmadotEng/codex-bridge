@@ -16,7 +16,7 @@ import urllib.request
 import uuid
 from .codex_adapter import AdapterError
 
-VERSION = '0.3.2-rc.5'
+VERSION = '0.3.2-rc.6'
 MAX_FILE = 8 * 1024 * 1024
 MAX_HTTP = 12 * 1024 * 1024
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted', 'uncertain'}
@@ -232,7 +232,8 @@ class Bridge:
                 return True
         for kind in ('artifact_requests', 'artifact_transfers'):
             for item in self.store.all(kind):
-                if item.get('peer_id', item.get('actor')) == peer_id and item.get('status') not in ('completed', 'aborted', 'expired', 'failed', 'cancelled'):
+                if item.get('peer_id', item.get('actor')) == peer_id and (item.get('remote_abort_pending') or
+                        item.get('status') not in ('completed', 'aborted', 'expired', 'failed', 'cancelled')):
                     return True
         return False
 
