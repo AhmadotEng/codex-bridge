@@ -4,7 +4,11 @@
 
 rc.5 keeps exact SSH process ownership until exit and cleanup journaling succeed. An unconfirmed close reports `ssh_cleanup_unconfirmed`, retains its child for an explicit local disconnect retry, and blocks competing dialing. Caller cancellation does not abandon cleanup. A failed duplicate close preserves the selected route, while rejected unselected candidates are cleaned up. Revocation cannot authorize a remote call or prevent local cleanup of the retained owned process. A restarted daemon does not adopt a saved PID as a new process handle.
 
-Windows/Python 3.11 verification passed **409 tests: 401 passed and eight platform skips**, in 131.172 seconds. The 21 new cleanup regressions also passed independent review, including both reproduced candidate-retention and revoked-peer retry failures. Plugin manifest validation passed. Linux/package and live rc.5 acceptance remain pending.
+Windows/Python 3.11 verification passed **409 tests: 401 passed and eight platform skips**, in 131.172 seconds. Fedora/Python 3.14.7 passed **409 tests: 393 passed and 16 Windows-specific skips**, in 54.754 seconds. All 21 new cleanup regressions passed on both, plus independent review of the two reproduced candidate-retention and revoked-peer retry failures. Plugin manifest validation passed. Linux emitted four HTTPError cleanup ResourceWarnings without failing a test.
+
+Both exact packaged installers passed isolated upgrade and MCP checks. Linux also passed fresh/repeated installation. All 43 payloads matched between Windows and Linux, shell permissions/line endings were valid, and both installed MCP processes reported rc.5 and 21 tools. Fixture configuration, saved context and results stayed intact; neither package test invoked a real model or changed the live installation.
+
+Published [rc.5](https://github.com/AhmadotEng/codex-bridge/releases/tag/v0.3.2-rc.5) pins revision `6abf2c8c1d18d857dbbb696fe64128db2af4d615`. All seven [Windows, Ubuntu and macOS CI jobs](https://github.com/AhmadotEng/codex-bridge/actions/runs/36178119014) passed. All seven public downloads were independently hash-verified against the accepted candidate. Live rc.5 promotion and managed-connection acceptance remain pending; subsequent evidence updates do not replace those immutable release assets.
 
 The following receiver checks were performed separately on the existing rc.4 deployments on September 25, 2026; they do not establish rc.5 managed-connection acceptance.
 
