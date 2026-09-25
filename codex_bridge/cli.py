@@ -141,6 +141,12 @@ def connection_refused(exc):
     return isinstance(reason,ConnectionRefusedError) or getattr(reason,'errno',None) in (errno.ECONNREFUSED,10061)
 
 
+def _startup_probe_timeout():
+    # Windows can take just over two seconds to report a closed loopback port.
+    # Allow the explicit refusal to arrive; a timeout must still fail closed.
+    return 5 if os.name=='nt' else 2
+
+
 def launch(path,mode):
     cfg=read_config(path)
     state=Path(cfg['state_dir'])
@@ -244,11 +250,11 @@ def _start_daemon(path,interactive=None,resume=True):
         autostart.clear_stop(path,'daemon')
     try:
         # This probe must never wait for peers or SSH; a healthy offline bridge is running.
-        existing=valid_response(call(path,'session_list',{},timeout=2))
+        existing=valid_response(call(path,'session_list',{},timeout=_startup_probe_timeout()))
         return {'already_running':True,'launch_mode':cfg.get('launch_mode','background'),'status':existing}
     except OSError as exc:
         if not connection_refused(exc):
-            raise BridgeError('local_endpoint_unverified','A local listener did not prove readiness; no second daemon was launched') from exc
+            raise BridgeError('local_endpoint_unverified','Local endpoint readiness could not be verified; no second daemon was launched') from exc
     mode=cfg.get('launch_mode','background')
     if mode not in ('background','interactive'): raise BridgeError('configuration','launch_mode must be background or interactive')
     process=None
@@ -265,18 +271,20 @@ def _start_daemon(path,interactive=None,resume=True):
 def _wait_daemon_ready(path,process,result,mode):
     deadline=time.monotonic()+30
     while time.monotonic()<deadline:
-        if process and process.poll() is not None:
-            # A simultaneous start may have won the lifetime lock; use its healthy endpoint.
-            try:
-                valid_response(call(path,'session_list',{},timeout=2))
-                return {'already_running':True,'launch_mode':mode}
-            except OSError:
-                raise BridgeError('startup_failed','Bridge exited; inspect state/serve.stderr.log')
+        exited=process is not None and process.poll() is not None
+        remaining=deadline-time.monotonic()
+        if remaining<=0: break
         try:
-            valid_response(call(path,'session_list',{},timeout=2))
+            valid_response(call(path,'session_list',{},timeout=min(_startup_probe_timeout(),remaining)))
+            if exited:
+                # A simultaneous start may have won the lifetime lock; use its healthy endpoint.
+                return {'already_running':True,'launch_mode':mode}
             return {'started':True,'ready':True,**result}
         except OSError:
-            time.sleep(.25)
+            if exited:
+                raise BridgeError('startup_failed','Bridge exited; inspect state/serve.stderr.log')
+            remaining=deadline-time.monotonic()
+            if remaining>0: time.sleep(min(.25,remaining))
     raise BridgeError('startup_timeout','Bridge did not become ready; inspect state/serve.stderr.log. Interactive mode requires this Windows user to be signed in.')
 
 

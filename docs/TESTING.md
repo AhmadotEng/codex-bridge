@@ -1,5 +1,13 @@
 # Verification
 
+## 0.3.2-rc.4 Windows startup candidate
+
+The live rc.3 rollout revealed that Windows took about 2.05 seconds to report an explicitly refused loopback connection, exceeding the startup probe's two-second limit. Independent isolated probes reproduced a timeout at two seconds and WinError 10061 after approximately 2.03–2.05 seconds when given more time. The previous live code and exact configuration were restored; all 662 pre-window records, saved artifacts, startup registration and the existing SSH carrier were preserved.
+
+rc.4 gives Windows startup probes five seconds; other platforms retain two seconds. Only an explicit connection refusal allows a launch. Timeouts, failed authentication and malformed responses still prevent a second daemon. Readiness probes and sleeps are capped to the remaining 30-second readiness window. Focused tests use real isolated sockets for refused, healthy, slow, wedged and unauthorized endpoints, with launches mocked; actual packaged Windows daemon and scheduled-task acceptance remain a separate required gate before another live attempt or publication.
+
+Windows/Python 3.11 source verification completed with **388 tests: 380 passed and eight platform skips**, in 130.446 seconds. The 43 focused CLI/entrypoint tests passed before the full suite. These results verify the corrected probe logic and preserved rejection behavior; they do not substitute for the packaged or live upgrade checks.
+
 ## 0.3.2-rc.3 Linux user-unit correction
 
 Actual rc.2 testing on Fedora 44 found that systemd rejected the quoted `WorkingDirectory` as a non-absolute path. rc.3 serializes that directive as a literal absolute directory, escaping percent specifiers and preserving spaces, quotes, backslashes, and trailing whitespace. Command and environment quoting remain separate.
