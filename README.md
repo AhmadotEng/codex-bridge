@@ -15,12 +15,12 @@ Let two people's Codex installations exchange project tasks, replies, and select
 
 ## Install on both computers
 
-Use local Python 3.11+, a complete Codex installation signed into your own account, and OpenSSH. Download and extract the matching installer from the [0.3.2 release candidate](https://github.com/AhmadotEng/codex-bridge/releases/tag/v0.3.2-rc.2). Compare its SHA-256 with that release's `SHA256SUMS`.
+Use local Python 3.11+, a complete Codex installation signed into your own account, and OpenSSH. Download and extract the matching installer from the [0.3.2 release candidate](https://github.com/AhmadotEng/codex-bridge/releases/tag/v0.3.2-rc.3). Compare its SHA-256 with that release's `SHA256SUMS`.
 
 | Download | Run inside the extracted `codex-bridge` folder |
 | --- | --- |
-| [Windows ZIP](https://github.com/AhmadotEng/codex-bridge/releases/download/v0.3.2-rc.2/codex-bridge-0.3.2-rc.2-windows.zip) | PowerShell: `.\scripts\setup.ps1` |
-| [Linux tar.gz](https://github.com/AhmadotEng/codex-bridge/releases/download/v0.3.2-rc.2/codex-bridge-0.3.2-rc.2-linux.tar.gz) | Terminal: `sh scripts/setup.sh` |
+| [Windows ZIP](https://github.com/AhmadotEng/codex-bridge/releases/download/v0.3.2-rc.3/codex-bridge-0.3.2-rc.3-windows.zip) | PowerShell: `.\scripts\setup.ps1` |
+| [Linux tar.gz](https://github.com/AhmadotEng/codex-bridge/releases/download/v0.3.2-rc.3/codex-bridge-0.3.2-rc.3-linux.tar.gz) | Terminal: `sh scripts/setup.sh` |
 
 Both contain the same Bridge source and guides. Setup creates this computer's private configuration and registers its MCP tools. It does not copy accounts, install SSH services, or alter unrelated routes. The default location is `~/plugins/codex-bridge`; existing settings are preserved and conflicts are reported.
 

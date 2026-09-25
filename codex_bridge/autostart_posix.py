@@ -56,16 +56,32 @@ def unit_name(path, component, peer_id=None):
     return 'codex-bridge-' + component + '-' + hashlib.sha256(scope.encode()).hexdigest()[:24] + '.service'
 
 
-def _quote(value, *, command=False):
+def _unit_value(value):
     value = str(value)
     if not value or any(ord(c) < 32 or ord(c) == 127 for c in value):
         raise BridgeError('configuration', 'Service paths and arguments must be nonempty and contain no control characters.')
+    return value
+
+
+def _quote(value, *, command=False):
+    value = _unit_value(value)
     # systemd syntax, not shell quoting. Escape its specifiers and ExecStart
     # environment substitution even inside quoted arguments.
     value = value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%')
     if command:
         value = value.replace('$', '$$')
     return '"' + value + '"'
+
+
+def _working_directory(value):
+    # Unlike ExecStart/Environment, systemd's config_parse_working_directory
+    # does not unquote or C-unescape: spaces, quotes, backslashes and $ are
+    # literal here. Only percent specifiers need escaping. See systemd's
+    # src/core/load-fragment.c and src/shared/conf-parser.c.
+    value = _unit_value(value).replace('%', '%%')
+    # A final slash preserves directory identity while preventing whitespace
+    # stripping or line continuation for names ending in space or backslash.
+    return value if value.endswith('/') else value + '/'
 
 
 def unit_text(path, component, peer_id=None):
@@ -82,7 +98,7 @@ def unit_text(path, component, peer_id=None):
     lines = ['# Codex Bridge owner unit ' + scope, '[Unit]',
              'Description=Codex Bridge ' + ('waiting daemon' if component == 'daemon' else 'explicit persistent peer demand'),
              '[Service]', 'Type=' + ('simple' if component == 'daemon' else 'oneshot'),
-             'WorkingDirectory=' + _quote(source),
+             'WorkingDirectory=' + _working_directory(source),
              'Environment=' + _quote('PYTHONPATH=' + str(source)),
              'ExecStart=' + ' '.join(_quote(arg, command=True) for arg in args),
              # No unit restart policy can regenerate connection budgets. The

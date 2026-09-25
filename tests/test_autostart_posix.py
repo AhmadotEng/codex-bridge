@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -203,6 +204,83 @@ class UserUnitTests(unittest.TestCase):
             with self.assertRaises(BridgeError):
                 units._quote(value, command=True)
 
+    def test_working_directory_uses_literal_path_not_command_quoting(self):
+        cases = {
+            '/owner/plain': '/owner/plain/',
+            '/owner/a b/%n/$HOME/"c"/\\file': '/owner/a b/%%n/$HOME/"c"/\\file/',
+            '/owner/trailing space ': '/owner/trailing space /',
+            '/owner/trailing\\': '/owner/trailing\\/',
+            '/': '/',
+        }
+        for value, expected in cases.items():
+            with self.subTest(path=value):
+                self.assertEqual(units._working_directory(value), expected)
+        for value in ('', '/owner/line\nbreak', '/owner/line\rbreak', '/owner/tab\t', '/owner/null\0', '/owner/\x7f'):
+            with self.subTest(invalid=value), self.assertRaises(BridgeError):
+                units._working_directory(value)
+
+    def test_unit_keeps_command_and_environment_quoting_separate_from_directory(self):
+        source = self.root / 'source %n $HOME with spaces'
+        with mock.patch.object(units, '__file__', str(source / 'codex_bridge' / 'autostart_posix.py')):
+            content = units.unit_text(self.path, 'daemon')
+        directory = next(line for line in content.splitlines() if line.startswith('WorkingDirectory='))
+        environment = next(line for line in content.splitlines() if line.startswith('Environment='))
+        command = next(line for line in content.splitlines() if line.startswith('ExecStart='))
+        self.assertEqual(directory, 'WorkingDirectory=' + str(source).replace('%', '%%') + '/')
+        self.assertEqual(environment, 'Environment=' + units._quote('PYTHONPATH=' + str(source)))
+        self.assertTrue(environment.startswith('Environment="'))
+        self.assertTrue(command.startswith('ExecStart="'))
+        self.assertIn('"--component" "daemon"', command)
+        self.assertIn('Restart=no', content)
+
+    def saved_quoted_directory_unit(self):
+        """An exact, owned rc.2 registration, before this serialization fix."""
+        autostart.enable(self.path)
+        source = Path(units.__file__).resolve().parents[1]
+        current = self.unit().read_text()
+        previous = current.replace('WorkingDirectory=' + units._working_directory(source),
+                                   'WorkingDirectory=' + units._quote(source))
+        self.assertNotEqual(previous, current)
+        self.unit().write_bytes(previous.encode())
+        settings = cli.read(self.state / 'autostart.json')
+        settings['components']['daemon']['unit_sha256'] = hashlib.sha256(previous.encode()).hexdigest()
+        cli.save(self.state / 'autostart.json', settings)
+        self.manager.calls.clear()
+        return previous.encode(), (self.state / 'autostart.json').read_bytes()
+
+    def test_owned_old_quoted_unit_upgrades_without_starting_or_changing_identity(self):
+        old, _ = self.saved_quoted_directory_unit()
+        name = units.unit_name(self.path, 'daemon')
+        before = self.path.read_bytes()
+        autostart.enable(self.path)
+        current = self.unit().read_bytes()
+        self.assertNotEqual(current, old)
+        self.assertEqual(current, units.unit_text(self.path, 'daemon').encode())
+        entry = cli.read(self.state / 'autostart.json')['components']['daemon']
+        self.assertEqual(entry['unit_name'], name)
+        self.assertEqual(entry['unit_sha256'], hashlib.sha256(current).hexdigest())
+        self.assertEqual(before, self.path.read_bytes())
+        self.assertFalse({'start', 'stop', 'restart'} & {call[0] for call in self.manager.calls})
+
+    def test_failed_serialization_upgrade_restores_exact_old_registration(self):
+        old, settings = self.saved_quoted_directory_unit()
+        self.manager.fail_once = 'enable'
+        with self.assertRaises(BridgeError):
+            autostart.enable(self.path)
+        self.assertEqual(self.unit().read_bytes(), old)
+        self.assertEqual((self.state / 'autostart.json').read_bytes(), settings)
+        self.assertIn(units.unit_name(self.path, 'daemon'), self.manager.enabled)
+
+    def test_serialization_upgrade_preserves_active_old_unit_until_owner_stops_it(self):
+        old, settings = self.saved_quoted_directory_unit()
+        self.manager.active.add(units.unit_name(self.path, 'daemon'))
+        with self.assertRaises(BridgeError) as rejected:
+            autostart.enable(self.path)
+        self.assertEqual(rejected.exception.code, 'component_running')
+        self.assertEqual(self.unit().read_bytes(), old)
+        self.assertEqual((self.state / 'autostart.json').read_bytes(), settings)
+        self.assertFalse({'start', 'stop', 'restart', 'enable', 'disable'} & {call[0] for call in self.manager.calls})
+
     def test_distinct_config_and_peer_units_never_collide(self):
         names = {units.unit_name(self.root / name, component, peer) for name in ('A.json', 'a.json')
                  for component, peer in (('daemon', None), ('transport', 'one'), ('transport', 'two'))}
@@ -235,6 +313,46 @@ class UserUnitTests(unittest.TestCase):
 
 ORIGINAL_SYSTEMCTL = units._systemctl
 ORIGINAL_REQUIRE_LINUX = units._require_linux
+
+
+@unittest.skipUnless(sys.platform.startswith('linux') and shutil.which('systemd-analyze'),
+                     'Linux systemd-analyze is required for real unit-parser verification')
+class RealUserUnitParserTests(unittest.TestCase):
+    def test_generated_user_units_pass_real_systemd_analyze_without_starting_services(self):
+        # verify creates an offline test manager, never registers or starts this
+        # service. Isolate owner-unit lookup/runtime paths and disable generators.
+        with tempfile.TemporaryDirectory(prefix='bridge-systemd-verify-') as temporary:
+            root = Path(temporary).resolve()
+            runtime = root / 'runtime'
+            runtime.mkdir(mode=0o700)
+            env = {**os.environ, 'XDG_RUNTIME_DIR': str(runtime),
+                   'XDG_CONFIG_HOME': str(root / 'xdg-config'), 'XDG_DATA_HOME': str(root / 'xdg-data'),
+                   'SYSTEMD_GENERATOR_PATH': '', 'SYSTEMD_ENVIRONMENT_GENERATOR_PATH': '',
+                   'SYSTEMD_COLORS': '0', 'LC_ALL': 'C'}
+            env.pop('SYSTEMD_UNIT_PATH', None)
+            for number, name in enumerate(('plain', 'a b %n $HOME "quoted" \\backslash',
+                                           'trailing space ', 'trailing\\')):
+                with self.subTest(path=name):
+                    source = root / name
+                    source.mkdir()
+                    config = source / 'config %n $HOME "quoted".json'
+                    config.write_text('{}')
+                    unit = root / f'bridge-parser-fixture-{number}.service'
+                    with mock.patch.object(units, '__file__', str(source / 'codex_bridge' / 'autostart_posix.py')):
+                        unit.write_text(units.unit_text(config, 'daemon'), encoding='utf-8')
+                    result = subprocess.run([shutil.which('systemd-analyze'), '--user', '--man=no', 'verify', str(unit)],
+                        stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    if number == 0:
+                        # Counterexample: this must detect the exact rc.2 defect,
+                        # not merely find an analyzer that ignores the directive.
+                        old = root / 'bridge-parser-old-quoted.service'
+                        old.write_text(unit.read_text().replace(
+                            'WorkingDirectory=' + units._working_directory(source),
+                            'WorkingDirectory=' + units._quote(source)), encoding='utf-8')
+                        rejected = subprocess.run([shutil.which('systemd-analyze'), '--user', '--man=no', 'verify', str(old)],
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=30)
+                        self.assertNotEqual(rejected.returncode, 0, 'The old quoted WorkingDirectory must be rejected')
 
 
 if __name__ == '__main__':

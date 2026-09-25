@@ -1,12 +1,22 @@
 # Verification
 
+## 0.3.2-rc.3 Linux user-unit correction
+
+Actual rc.2 testing on Fedora 44 found that systemd rejected the quoted `WorkingDirectory` as a non-absolute path. rc.3 serializes that directive as a literal absolute directory, escaping percent specifiers and preserving spaces, quotes, backslashes, and trailing whitespace. Command and environment quoting remain separate.
+
+Regression tests cover replacement of an inactive Bridge-owned rc.2 unit, unchanged unit identity/configuration, exact rollback on registration failure, and preservation of an active unit until coordinated shutdown. A Linux-only test runs the real `systemd-analyze --user verify` parser against generated units and verifies that the former quoted form is rejected. This test uses isolated paths and never registers or starts a service. Actual owner-manager startup and login/reboot verification of rc.3 remain pending.
+
 ## 0.3.2-rc.2 owner-selected execution policy
 
 This candidate adds `full-access` for an explicitly selected local project. Existing project defaults and waiting-only startup are unchanged. A peer task cannot change its receiving project's policy. The installed runtime must validate the full-access request and response schemas before any such turn starts; an unsupported runtime does not fall back to another policy.
 
 On **Windows, Python 3.11, and Codex 0.153.4**, an isolated native verification completed two turns in the same dedicated conversation. The first fetched a marker from a temporary loopback HTTP endpoint and wrote/read the exact response in an owner-selected fixture file outside the workspace. The second recalled a conversation-only marker, read the file, and removed that exact file. Both turns produced native command completion evidence with successful exits; the HTTP server independently observed requests, and the harness independently checked the file and its removal. The worker released its App Server after each turn. The existing live Bridge configuration remained byte-for-byte unchanged.
 
-This proves local owner-account command, filesystem, network, and retained-context behavior. It does not prove public-internet access, administrator elevation, Linux full-access activation, or live deployment of this candidate. The earlier connection/startup results below remain version-specific evidence; real two-computer managed-tunnel and reboot acceptance remains pending.
+On **Fedora 44 and Codex 0.155.1**, the receiving owner reported an independently verified rc.2 candidate: all 43 payload hashes matched; installation/reinstallation and MCP initialization passed; 365 tests ran with 350 passed and 15 skipped. Two native full-access turns passed external-fixture write/read/removal, loopback HTTP, retained context, and writer release. A manually started isolated daemon waited for 120 seconds without SSH children or connection demands. The systemd start failed as described above; the temporary candidate unit was removed and live startup remained unchanged.
+
+The owner subsequently promoted the live Linux daemon to rc.2 using manual startup and reported preservation of all 124 earlier database records and saved artifact bytes. A new paired maintenance project then completed two actual full-access turns dispatched from the Windows Bridge: an external temporary fixture was created/read/removed, a loopback HTTP request was observed, and the second turn recalled a conversation-only marker in the same thread. All four native commands exited successfully; the App Server closed after each turn. Both proof artifacts arrived directly on Windows with matching SHA-256 checksums. The old restricted project and conversation remained intact.
+
+This verifies live Linux maintenance execution and direct task/result/artifact exchange over the preserved legacy route. Windows still used its older daemon during that paired test. It does not prove public-internet access, administrator elevation, the new either-origin connection protocol, corrected systemd startup, or actual login/reboot recovery. The earlier connection/startup results below remain version-specific evidence.
 
 ## 0.3.2-rc.1 waiting/connection candidate
 

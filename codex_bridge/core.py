@@ -16,7 +16,7 @@ import urllib.request
 import uuid
 from .codex_adapter import AdapterError
 
-VERSION = '0.3.2-rc.2'
+VERSION = '0.3.2-rc.3'
 MAX_FILE = 8 * 1024 * 1024
 MAX_HTTP = 12 * 1024 * 1024
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted', 'uncertain'}
