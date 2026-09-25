@@ -26,7 +26,7 @@ Use local Python 3.11+, a complete Codex installation signed into your own accou
 
 Both contain the same Bridge source and guides. Setup creates this computer's private configuration and registers its MCP tools. It does not copy accounts, install SSH services, or alter unrelated routes. The default location is `~/plugins/codex-bridge`; existing settings are preserved and conflicts are reported.
 
-**Experimental prerelease:** the existing Windows installation upgraded successfully with its saved work, sign-in task and working Linux route preserved. Managed Windows/Linux connections initiated from either computer, simultaneous initiation, and actual sign-in/reboot acceptance remain pending. See the [test evidence](docs/TESTING.md).
+**Experimental prerelease:** the existing Windows and Linux installations upgraded successfully with saved work and the working SSH route preserved. Native tasks, file transfer, retained context and request deduplication passed over that route. Managed connections initiated from either computer, simultaneous initiation, and actual sign-in/reboot acceptance remain pending. See the [test evidence](docs/TESTING.md).
 
 Follow the **[two-computer setup guide](docs/SETUP.md)** to exchange invitations, authorize SSH in both directions, and choose project folders. Select the same project ID on both computers. Waiting startup is optional; persistent connections are off by default.
 
